@@ -1,0 +1,4 @@
+dat/*
+vault/*
+!.gitempty
+!*.sample.json

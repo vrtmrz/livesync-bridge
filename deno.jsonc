@@ -1,0 +1,11 @@
+{
+    "tasks": {
+        "dev": "deno run --unstable --watch -A main.ts",
+        "run": "deno run --unstable -A main.ts"
+    },
+    "imports": {
+        "xxhash-wasm-102": "npm:xxhash-wasm@^1.0.2",
+        "crypto": "node:crypto",
+        "minimatch": "npm:minimatch"
+    }
+}

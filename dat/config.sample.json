@@ -1,0 +1,35 @@
+{
+    "peers": [
+        {
+            "type": "couchdb",
+            "name": "test1",
+            "database": "test",
+            "username": "admin",
+            "password": "password",
+            "url": "http://localhost:5984",
+            "customChunkSize": 100,
+            "minimumChunkSize": 20,
+            "passphrase": "passphrase",
+            "obfuscatePassphrase": "passphrase",
+            "baseDir": "blog/"
+        },
+        {
+            "type": "couchdb",
+            "name": "test2",
+            "database": "test2",
+            "passphrase": "passphrase",
+            "password": "password",
+            "url": "http://localhost:5984",
+            "username": "admin",
+            "customChunkSize": 100,
+            "minimumChunkSize": 20,
+            "obfuscatePassphrase": "passphrase",
+            "baseDir": "blog/"
+        },
+        {
+            "type": "storage",
+            "name": "test2",
+            "baseDir": "./vault/"
+        }
+    ]
+}
