@@ -32,10 +32,11 @@ export class PeerStorage extends Peer {
             await Deno.remove(path);
             this.receiveLog(` ${path} deleted`);
         } catch (ex) {
+            this.receiveLog(` ${path} delete failed`, LOG_LEVEL_NOTICE);
             Logger(ex, LOG_LEVEL_VERBOSE);
             return false;
         }
-        this.receiveLog(` ${path} delete failed`, LOG_LEVEL_NOTICE);
+        this.runScript(path, true);
         return true;
     }
     async put(pathSrc: string, data: FileData): Promise<boolean> {
@@ -55,6 +56,7 @@ export class PeerStorage extends Peer {
             await Deno.futime(fp.rid, new Date(data.mtime), new Date(data.mtime));
             fp.close();
             this.receiveLog(`${lp} saved`);
+            this.runScript(path, false);
             return true;
         } catch (ex) {
             Logger(ex, LOG_LEVEL_INFO);
@@ -62,6 +64,65 @@ export class PeerStorage extends Peer {
             return false;
         }
     }
+
+    async runScript(filename: string, isDeleted: boolean): Promise<boolean> {
+        if (!this.config.processor) return false;
+        if (!this.config.processor.cmd) return false;
+
+        // const result = [];
+        try {
+            // const startDate = new Date();
+            const cmd = this.config.processor.cmd;
+            const mode = isDeleted ? "deleted" : "modified";
+            const args = this.config.processor.args.map(e => {
+                if (e == "$filename") return filename;
+                if (e == "$mode") return mode;
+                return e
+            });
+            // const dateStr = startDate.toLocaleString();
+            const scriptLineMessage = `Script: called ${cmd} with args ${JSON.stringify(args)}`;
+            this.normalLog(`Processor : ${scriptLineMessage}`)
+            const command = new Deno.Command(
+                cmd, {
+                args: args,
+                cwd: ".",
+                env: {
+                    filename: filename,
+                    mode: mode
+                }
+            });
+            // const start = performance.now();
+            const { code, stdout, stderr } = await command.output();
+            // const end = performance.now();
+            const stdoutText = new TextDecoder().decode(stdout);
+            const stderrText = new TextDecoder().decode(stderr);
+            // result.push(`# Processor called: ${dateStr}\n`);
+            // result.push(`command: \`${scriptLineMessage}\``);
+            if (code === 0) {
+                this.normalLog("Processor called: Performed successfully.")
+                // result.push("Processor called: Performed successfully.")
+                this.normalLog(stdoutText);
+            } else {
+                this.normalLog("Processor called: Performed but with some errors.")
+                // result.push("Processor called: Performed but with some errors.")
+                this.normalLog(stderrText, LOG_LEVEL_NOTICE);
+            }
+            // result.push(`\n- Spent ${Math.ceil(end - start) / 1000} ms`);
+            // result.push("## --STDOUT--\n")
+            // result.push("```\n" + stdoutText + "\n```");
+            // result.push("## --STDERR--n")
+            // result.push("```\n" + stderrText + "\n```");
+            // const strResult = result.join("\n");
+            return true;
+        } catch (ex) {
+            this.normalLog("Processor: Error on processing");;
+            this.normalLog(ex);
+            this.normalLog(JSON.stringify(ex, null, 2));
+            return false;
+        }
+
+    }
+
     async get(pathSrc: string): Promise<false | FileData> {
         const lp = this.toLocalPath(pathSrc);
         const path = this.toStoragePath(lp);

@@ -9,6 +9,10 @@ export interface PeerStorageConf {
     type: "storage";
     name: string;
     baseDir: string;
+    processor?: {
+        cmd: string,
+        args: string[]
+    }
 }
 export interface PeerCouchDBConf extends DirectFileManipulatorOptions {
     type: "couchdb";

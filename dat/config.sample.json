@@ -28,8 +28,29 @@
         },
         {
             "type": "storage",
-            "name": "test2",
-            "baseDir": "./vault/"
+            "name": "test-windows",
+            "baseDir": "./vault/",
+            "processor": {
+                "cmd": "cmd",
+                "args": [
+                    "/C",
+                    "script\\test.bat",
+                    "$filename",
+                    "$mode"
+                ]
+            }
+        },
+        {
+            "type": "storage",
+            "name": "test-linux",
+            "baseDir": "./vault/",
+            "processor": {
+                "cmd": "script/test.sh",
+                "args": [
+                    "$filename",
+                    "$mode"
+                ]
+            }
         }
     ]
 }

@@ -75,7 +75,13 @@ The configuration file consists of the following structure.
     {
       "type": "storage",
       "name": "storage-test1",
-      "baseDir": "./vault/" // The folder which have been synchronised.
+      "baseDir": "./vault/", // The folder which have been synchronised.
+      "processor": { // The processor configuration. You can omit this.
+        "cmd": "script/test.sh",  // The programme which run at file modification or deletion.
+        "args": [ "$filename", "$mode" ] 
+        // The modified file is set to $filename. The mode is set to `deleted` or `modified`. 
+        // $filename and $mode have been set also in environment variables.
+      }
     }
   ]
 }

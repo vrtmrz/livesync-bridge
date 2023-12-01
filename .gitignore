@@ -2,3 +2,4 @@ dat/*
 vault/*
 !.gitempty
 !*.sample.json
+*.log
