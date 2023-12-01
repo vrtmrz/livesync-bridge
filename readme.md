@@ -125,8 +125,7 @@ Totally, all files are synchronized like this:
 
 ... with the configuration below:
 
-````json
-```jsonc
+````jsonc
 {
   "peers": [
     {
