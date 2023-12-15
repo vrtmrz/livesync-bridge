@@ -1,5 +1,5 @@
 dat/*
-vault/*
+vault*/*
 !.gitempty
 !*.sample.json
 *.log
