@@ -4,7 +4,7 @@ import { PeerCouchDBConf, FileData } from "./types.ts";
 import { decodeBinary } from "./lib/src/strbin.ts";
 import { isPlainText } from "./lib/src/path.ts";
 import { DispatchFun, Peer } from "./Peer.ts";
-import { createBinaryBlob, createTextBlob } from "./lib/src/utils.ts";
+import { createBinaryBlob, createTextBlob, isDocContentSame } from "./lib/src/utils.ts";
 
 // export class PeerInstance()
 
@@ -42,9 +42,18 @@ export class PeerCouchDB extends Peer {
             size: data.size
         };
         const saveData = (data.data instanceof Uint8Array) ? createBinaryBlob(data.data) : createTextBlob(data.data);
+        const old = await this.man.get(path as FilePathWithPrefix, true) as false | MetaEntry;
         // const old = await this.getMeta(path as FilePathWithPrefix);
-        // if (old && this.compareDate(info, old)<0) {
-        // }
+        if (old && Math.abs(this.compareDate(info, old)) < 3600) {
+            const oldDoc = await this.man.getByMeta(old);
+            if (oldDoc && ("data" in oldDoc)) {
+                const d = oldDoc.type == "plain" ? createTextBlob(oldDoc.data) : createBinaryBlob(new Uint8Array(decodeBinary(oldDoc.data)));
+                if (await isDocContentSame(d, saveData)) {
+                    this.normalLog(` Skipped (Same) ${path} `);
+                    return false;
+                }
+            }
+        }
         const r = await this.man.put(path, saveData, info, type);
         if (r) {
             this.receiveLog(` ${path} saved`);

@@ -3,6 +3,7 @@
         {
             "type": "couchdb",
             "name": "test1",
+            "group": "main",
             "database": "test",
             "username": "admin",
             "password": "password",
@@ -16,6 +17,7 @@
         {
             "type": "couchdb",
             "name": "test2",
+            "group": "sub",
             "database": "test2",
             "passphrase": "passphrase",
             "password": "password",
@@ -24,10 +26,11 @@
             "customChunkSize": 100,
             "minimumChunkSize": 20,
             "obfuscatePassphrase": "passphrase",
-            "baseDir": "blog/"
+            "baseDir": "syncLinux/"
         },
         {
             "type": "storage",
+            "group": "main",
             "name": "test-windows",
             "baseDir": "./vault/",
             "processor": {
@@ -38,19 +41,22 @@
                     "$filename",
                     "$mode"
                 ]
-            }
+            },
+            "scanOfflineChanges": true
         },
         {
             "type": "storage",
+            "group": "sub",
             "name": "test-linux",
-            "baseDir": "./vault/",
+            "baseDir": "./vault-linux/",
             "processor": {
                 "cmd": "script/test.sh",
                 "args": [
                     "$filename",
                     "$mode"
                 ]
-            }
+            },
+            "scanOfflineChanges": true
         }
     ]
 }

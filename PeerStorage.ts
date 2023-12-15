@@ -1,4 +1,4 @@
-import { resolve } from "https://deno.land/std@0.203.0/path/mod.ts";
+import { dirname, resolve } from "https://deno.land/std@0.203.0/path/mod.ts";
 import { LOG_LEVEL_INFO, LOG_LEVEL_NOTICE, LOG_LEVEL_VERBOSE } from "./lib/src/types.ts";
 import { PeerStorageConf, FileData } from "./types.ts";
 import { Logger } from "./lib/src/logger.ts";
@@ -11,7 +11,7 @@ import { parse } from "https://deno.land/std@0.203.0/path/parse.ts";
 import { posixFormat } from "https://deno.land/std@0.203.0/path/_format.ts";
 import { scheduleOnceIfDuplicated } from "./lib/src/lock.ts";
 import { DispatchFun, Peer } from "./Peer.ts";
-
+import { walk } from "https://deno.land/std@0.209.0/fs/walk.ts";
 
 
 export class PeerStorage extends Peer {
@@ -47,6 +47,13 @@ export class PeerStorage extends Peer {
             return false;
         }
         try {
+            const dirName = dirname(path);
+            try {
+                await Deno.mkdir(dirName, { recursive: true });
+            } catch (ex) {
+                // While recursive is true, mkdir will not raise the `AlreadyExist`.
+                console.log(ex);
+            }
             const fp = await Deno.open(path, { read: true, write: true, create: true });
             if (data.data instanceof Uint8Array) {
                 await fp.write(data.data);
@@ -56,6 +63,7 @@ export class PeerStorage extends Peer {
             await Deno.futime(fp.rid, new Date(data.mtime), new Date(data.mtime));
             fp.close();
             this.receiveLog(`${lp} saved`);
+            await this.writeFileStat(pathSrc);
             this.runScript(path, false);
             return true;
         } catch (ex) {
@@ -127,6 +135,9 @@ export class PeerStorage extends Peer {
         const lp = this.toLocalPath(pathSrc);
         const path = this.toStoragePath(lp);
         const stat = await Deno.stat(path);
+        if (!stat.isFile) {
+            return false;
+        }
         const ret: FileData = {
             ctime: stat.mtime?.getTime() ?? 0,
             mtime: stat.mtime?.getTime() ?? 0,
@@ -151,6 +162,7 @@ export class PeerStorage extends Peer {
 
         scheduleOnceIfDuplicated(pathSrc, async () => {
             // console.log(data);
+            await this.writeFileStat(path);
             await delay(250);
             if (!await this.isRepeating(path, data)) {
                 this.sendLog(`${path} change detected`);
@@ -184,11 +196,55 @@ export class PeerStorage extends Peer {
         return ret;
     }
 
+    async writeFileStat(pathSrc: string, statSrc?: Deno.FileInfo) {
+        const lp = this.toLocalPath(pathSrc);
+        const key = `file-stat-${lp}`;
+        const path = this.toStoragePath(lp);
+        const stat = statSrc ?? await Deno.stat(path);
+        if (!stat.isFile) {
+            return false;
+        }
+        const fileStat = `${stat.mtime?.getTime() ?? 0}-${stat.size}`;
+        this.setSetting(key, fileStat);
+    }
+
+    async isChanged(pathSrc: string) {
+        const lp = this.toLocalPath(pathSrc);
+        const key = `file-stat-${lp}`;
+        const last = this.getSetting(key);
+        // console.log(`R:${key}`);
+        // console.log(`RV:${last}`);
+
+        const path = this.toStoragePath(lp);
+        const stat = await Deno.stat(path);
+        if (!stat.isFile) {
+            return false;
+        }
+        if (!last) return true;
+        const fileStat = `${stat.mtime?.getTime() ?? 0}-${stat.size}`;
+        // console.log(`RVX:${fileStat}`);
+        if (last !== fileStat) return true;
+        return false;
+    }
     async start(): Promise<void> {
         if (this.watcher) {
             this.watcher.close();
         }
         const lP = this.toStoragePath(this.toLocalPath("."));
+        this.normalLog(`Scan offline changes: ${this.config.scanOfflineChanges ? "Enabled, now starting..." : "Disabled"}`);
+        if (this.config.scanOfflineChanges) {
+            for await (const entry of walk(lP)) {
+                const ePath = this.toPosixPath(relative(this.toLocalPath("."), entry.path));
+                if (!await this.isChanged(ePath)) {
+                    // this.debugLog(`Not changed: ${ePath}`);
+                } else {
+                    this.debugLog(`Changes detected: ${ePath}`);
+                    await this.dispatch(entry.path);
+                }
+            }
+            this.normalLog(`Scan offline changes: Finished`);
+        }
+
         this.watcher = Deno.watchFs(lP, { recursive: true });
         for await (const event of this.watcher) {
             // Logger(`${event.kind} ${event.paths.join(",")}`);

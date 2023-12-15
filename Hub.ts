@@ -33,7 +33,7 @@ export class Hub {
 
     async dispatch(source: Peer, path: string, data: FileData | false) {
         for (const peer of this.peers) {
-            if (peer !== source) {
+            if (peer !== source && (source.config.group ?? "") === (peer.config.group ?? "")) {
                 let ret = false;
                 if (data === false) {
                     ret = await peer.delete(path);

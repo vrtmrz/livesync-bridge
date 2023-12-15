@@ -35,6 +35,8 @@ git clone --recursive https://github.com/vrtmrz/livesync-bridge
 $ deno run -A main.ts
 ```
 
+Note: If you want to scan all storage and databases from the beginning, please run with `--reset`.
+
 # Docker Instructions
 
 Currently underway. Contributions are also being accepted!
@@ -49,6 +51,7 @@ The configuration file consists of the following structure.
     {
       "type": "couchdb", // Type should be `couchdb or storage`
       "name": "test1", // Should be unique
+      "group": "main", // we can omit this.
       "database": "test",
       "username": "admin",
       "password": "password",
@@ -62,6 +65,7 @@ The configuration file consists of the following structure.
     {
       "type": "couchdb",
       "name": "test2", // We can even synchronise the same databases as long as they have different names in here.
+      "group": "main", // we can omit this.
       "database": "test2",
       "username": "admin",
       "passphrase": "passphrase",
@@ -70,18 +74,20 @@ The configuration file consists of the following structure.
       "customChunkSize": 100,
       "minimumChunkSize": 20,
       "obfuscatePassphrase": "passphrase",
-      "baseDir": "xxxx/"
+      "baseDir": "xxxx/",
     },
     {
       "type": "storage",
       "name": "storage-test1",
+      "group": "main", // we can omit this.
       "baseDir": "./vault/", // The folder which have been synchronised.
       "processor": { // The processor configuration. You can omit this.
         "cmd": "script/test.sh",  // The programme which run at file modification or deletion.
         "args": [ "$filename", "$mode" ] 
         // The modified file is set to $filename. The mode is set to `deleted` or `modified`. 
         // $filename and $mode have been set also in environment variables.
-      }
+      },
+      "scanOfflineChanges": true,
     }
   ]
 }

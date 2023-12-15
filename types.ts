@@ -6,7 +6,9 @@ export interface Config {
 export type PeerConf = PeerStorageConf | PeerCouchDBConf;
 
 export interface PeerStorageConf {
+    scanOfflineChanges?: boolean;
     type: "storage";
+    group?: string;
     name: string;
     baseDir: string;
     processor?: {
@@ -16,6 +18,7 @@ export interface PeerStorageConf {
 }
 export interface PeerCouchDBConf extends DirectFileManipulatorOptions {
     type: "couchdb";
+    group?: string;
     name: string;
     database: string;
     username: string;
