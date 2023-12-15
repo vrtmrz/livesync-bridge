@@ -82,7 +82,7 @@ export class PeerCouchDB extends Peer {
         };
     }
     async start(): Promise<void> {
-        const baseDir = this.toLocalPath(".");
+        const baseDir = this.toLocalPath("");
         const w = await this.man._fetchJson([MILSTONE_DOCID], {}, "get", {}) as Record<string, any>;
         const created = w.created;
         if (this.getSetting("remote-created") !== `${created}`) {

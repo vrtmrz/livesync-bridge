@@ -17,9 +17,9 @@ export abstract class Peer {
         this.dispatchToHub = dispatcher;
     }
     toLocalPath(path: string) {
-
-        const r = joinPosix(this.config.baseDir, path);
-        const ret = (r.startsWith("_")) ? ("/" + r) : r;
+        const relativeJoined = joinPosix(this.config.baseDir, path);
+        const relative = relativeJoined == "." ? "" : relativeJoined;
+        const ret = (relative.startsWith("_")) ? ("/" + relative) : relative;
         // this.debugLog(`**TOLOCAL: ${path} => ${ret}`);
         return ret;
     }
