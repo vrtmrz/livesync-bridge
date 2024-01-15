@@ -39,7 +39,20 @@ Note: If you want to scan all storage and databases from the beginning, please r
 
 # Docker Instructions
 
-Currently underway. Contributions are also being accepted!
+1. Clone the GitHub Repository
+
+```git
+git clone https://github.com/vrtmrz/livesync-bridge
+```
+
+2. Open the config file dat/config.sample.json, edit and save to
+   dat/config.json. (storage folder have to start with "data/" to be in the volume)
+
+3. Simply run like this.
+```bash
+docker compose up -d
+```
+
 
 # Configuration
 
