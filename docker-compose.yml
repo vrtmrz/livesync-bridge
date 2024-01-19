@@ -1,0 +1,7 @@
+version: '2.24.1'
+services:
+  alpine:
+    build: .
+    volumes:
+      - /d/Users/Tom/Desktop/test/dat/:/livesync-bridge/dat/
+      - /d/Users/Tom/Desktop/test/obsidian/:/livesync-bridge/obsidian/

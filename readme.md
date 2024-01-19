@@ -39,7 +39,26 @@ Note: If you want to scan all storage and databases from the beginning, please r
 
 # Docker Instructions
 
-Currently underway. Contributions are also being accepted!
+Image deployed: [dockerhub](https://hub.docker.com/repository/docker/vrtmrz/livesync-bridge/) [quay.io](https://quay.io/repository/vrtmrz/livesync-bridge)
+
+Usage
+
+```bash
+docker run -d \
+  -v <path for config files>:/livesync-bridge/dat/ \
+  -v <path for storage folder>:/livesync-bridge/<storage>/ \
+  vrtmrz/livesync-bridge
+```
+
+```docker-compose
+version: '2.24.1'
+services:
+  alpine:
+    image: canardconfit/livesync-bridge
+    volumes:
+      - <path for config files>:/livesync-bridge/dat/
+      - <path for storage folder>:/livesync-bridge/<storage>/
+```
 
 # Configuration
 

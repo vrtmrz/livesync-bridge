@@ -117,6 +117,7 @@ export class PeerCouchDB extends Peer {
             }
         }, (entry) => {
             this.setSetting("since", this.man.since);
+            console.log(entry.path + " " + baseDir + " :" + entry.path.startsWith(baseDir));
             return entry.path.startsWith(baseDir);
         });
     }
