@@ -56,9 +56,11 @@ export class PeerStorage extends Peer {
             }
             const fp = await Deno.open(path, { read: true, write: true, create: true });
             if (data.data instanceof Uint8Array) {
-                await fp.write(data.data);
+                const writtensize = await fp.write(data.data);
+                await fp.truncate(writtensize);
             } else {
-                await fp.write(new TextEncoder().encode(getDocData(data.data)));
+                const writtensize = await fp.write(new TextEncoder().encode(getDocData(data.data)));
+                await fp.truncate(writtensize);
             }
             await Deno.futime(fp.rid, new Date(data.mtime), new Date(data.mtime));
             fp.close();
