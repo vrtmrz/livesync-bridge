@@ -9,7 +9,7 @@ import { relative } from "https://deno.land/std@0.203.0/path/relative.ts";
 import { format } from "https://deno.land/std@0.203.0/path/format.ts";
 import { parse } from "https://deno.land/std@0.203.0/path/parse.ts";
 import { posixFormat } from "https://deno.land/std@0.203.0/path/_format.ts";
-import { skipIfDuplicated } from "./lib/src/lock.ts";
+import { scheduleOnceIfDuplicated } from "./lib/src/lock.ts";
 import { DispatchFun, Peer } from "./Peer.ts";
 import { walk } from "https://deno.land/std@0.209.0/fs/walk.ts";
 
@@ -160,7 +160,7 @@ export class PeerStorage extends Peer {
 
         if (data === false) return;
 
-        skipIfDuplicated(pathSrc, async () => {
+        scheduleOnceIfDuplicated(pathSrc, async () => {
             // console.log(data);
             await this.writeFileStat(path);
             await delay(250);
@@ -176,7 +176,7 @@ export class PeerStorage extends Peer {
     async dispatchDeleted(pathSrc: string) {
         const lP = this.toStoragePath(this.toLocalPath("."));
         const path = this.toPosixPath(relative(lP, pathSrc));
-        skipIfDuplicated(pathSrc, async () => {
+        scheduleOnceIfDuplicated(pathSrc, async () => {
             await delay(250);
             if (!await this.isRepeating(path, false)) {
                 this.sendLog(`${path} delete detected`);
