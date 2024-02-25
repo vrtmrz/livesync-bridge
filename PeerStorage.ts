@@ -62,7 +62,7 @@ export class PeerStorage extends Peer {
                 const writtensize = await fp.write(new TextEncoder().encode(getDocData(data.data)));
                 await fp.truncate(writtensize);
             }
-            await Deno.futime(fp.rid, new Date(data.mtime), new Date(data.mtime));
+            await fp.utime(new Date(data.mtime), new Date(data.mtime));
             fp.close();
             this.receiveLog(`${lp} saved`);
             await this.writeFileStat(pathSrc);
