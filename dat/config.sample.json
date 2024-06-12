@@ -56,7 +56,8 @@
                     "$mode"
                 ]
             },
-            "scanOfflineChanges": true
+            "scanOfflineChanges": true,
+            "usePolling": true
         }
     ]
 }
