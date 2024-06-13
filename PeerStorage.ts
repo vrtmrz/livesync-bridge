@@ -242,6 +242,7 @@ export class PeerStorage extends Peer {
                 awaitWriteFinish: {
                     stabilityThreshold: 500,
                 },
+                usePolling: this.config.usePolling,
             });
 
         this.watcher.on("change",async (path)=>{

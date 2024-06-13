@@ -101,6 +101,7 @@ The configuration file consists of the following structure.
         // $filename and $mode have been set also in environment variables.
       },
       "scanOfflineChanges": true,
+      "usePolling": false // Optional. Use polling instead of inotify to watch file changes.
     }
   ]
 }
