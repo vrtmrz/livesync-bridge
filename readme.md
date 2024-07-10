@@ -46,7 +46,7 @@ git clone https://github.com/vrtmrz/livesync-bridge
 ```
 
 2. Open the config file dat/config.sample.json, edit and save to
-   dat/config.json. (storage folder have to start with "data/" to be in the volume)
+   dat/config.json. (The storage folder has to start with "data/" to be in the volume)
 
 3. Simply run like this.
 ```bash
@@ -73,7 +73,8 @@ The configuration file consists of the following structure.
       "minimumChunkSize": 20,
       "passphrase": "passphrase", // E2EE passphrase, if you do not enabled, leave it blank.
       "obfuscatePassphrase": "passphrase", // Path obfuscation passphrase, if you do not enabled, leave it blank. if enabled, set the same value of passphrase.
-      "baseDir": "blog/" // Sharing folder
+      "baseDir": "blog/", // Sharing folder
+      "useRemoteTweaks":true // Overwrite customChunkSize or minimumChunkSize, and check configuration matches
     },
     {
       "type": "couchdb",
@@ -101,6 +102,7 @@ The configuration file consists of the following structure.
         // $filename and $mode have been set also in environment variables.
       },
       "scanOfflineChanges": true,
+      "useChokidar":false, // We are using `Deno.watch` now, if you have trouble in Linux, please enable this.
     }
   ]
 }
