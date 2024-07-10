@@ -1,5 +1,5 @@
-import { defaultLoggerEnv } from "./lib/src/logger.ts";
-import { LOG_LEVEL_DEBUG } from "./lib/src/types.ts";
+import { defaultLoggerEnv } from "./lib/src/common/logger.ts";
+import { LOG_LEVEL_DEBUG } from "./lib/src/common/logger.ts";
 import { Hub } from "./Hub.ts";
 import { Config } from "./types.ts";
 import { parse } from "https://deno.land/std@0.202.0/flags/mod.ts";

@@ -4,8 +4,25 @@
         "run": "deno run --unstable -A main.ts"
     },
     "imports": {
+        "../worker/splitWorker.ts": "../worker/splitWorker.mock.ts",
+        "./lib/src/worker/splitWorker.ts": "./lib/src/worker/splitWorker.mock.ts",
         "xxhash-wasm-102": "npm:xxhash-wasm@^1.0.2",
         "crypto": "node:crypto",
-        "minimatch": "npm:minimatch"
-    }
+        "minimatch": "npm:minimatch",
+        "octagonal-wheels/": "npm:/octagonal-wheels@^0.1.12/",
+        "fflate": "npm:fflate@^0.8.2",
+        "fs/": "https://deno.land/std@0.224.0/fs/",
+        "pouchdb-core": "npm:pouchdb-core@^8.0.1",
+        "pouchdb-adapter-http": "npm:pouchdb-adapter-http@^8.0.1",
+        "pouchdb-replication": "npm:pouchdb-replication@^8.0.1",
+        "pouchdb-find": "npm:pouchdb-find@^8.0.1",
+        "pouchdb-merge": "npm:pouchdb-merge@^8.0.1",
+        "pouchdb-utils": "npm:pouchdb-utils@^8.0.1",
+        "pouchdb-errors": "npm:pouchdb-errors@^8.0.1",
+        "pouchdb-mapreduce": "npm:pouchdb-mapreduce@^8.0.1",
+        "transform-pouch": "npm:transform-pouch@^2.0.0",
+        "chokidar": "npm:chokidar@^3.5.1",
+        "debounce": "https://deno.land/std@0.224.0/async/debounce.ts"
+    },
+    "unstable": ["sloppy-imports"]
 }

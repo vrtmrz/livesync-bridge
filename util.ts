@@ -1,5 +1,7 @@
-import { uint8ArrayToHexString } from "./lib/src/strbin.ts";
-import { createTextBlob } from "./lib/src/utils.ts";
+import { uint8ArrayToHexString } from "./lib/src/string_and_binary/convert.ts";
+import { createTextBlob } from "./lib/src/common/utils.ts";
+
+
 export async function computeHashUInt8Array(key: Uint8Array) {
     const digest = await crypto.subtle.digest('SHA-256', key);
     return uint8ArrayToHexString(new Uint8Array(digest));

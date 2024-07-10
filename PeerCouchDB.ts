@@ -1,10 +1,10 @@
-import { DirectFileManipulator, FileInfo, MetaEntry, ReadyEntry } from "./lib/src/DirectFileManipulator.ts";
-import { FilePathWithPrefix, LOG_LEVEL_NOTICE, MILSTONE_DOCID } from "./lib/src/types.ts";
+import { DirectFileManipulator, FileInfo, MetaEntry, ReadyEntry } from "./lib/src/API/DirectFileManipulatorV2.ts";
+import { FilePathWithPrefix, LOG_LEVEL_NOTICE, MILSTONE_DOCID, TweakValues } from "./lib/src/common/types.ts";
 import { PeerCouchDBConf, FileData } from "./types.ts";
-import { decodeBinary } from "./lib/src/strbin.ts";
-import { isPlainText } from "./lib/src/path.ts";
+import { decodeBinary } from "./lib/src/string_and_binary/convert.ts";
+import { isPlainText } from "./lib/src/string_and_binary/path.ts";
 import { DispatchFun, Peer } from "./Peer.ts";
-import { createBinaryBlob, createTextBlob, isDocContentSame } from "./lib/src/utils.ts";
+import { createBinaryBlob, createTextBlob, isDocContentSame, unique } from "./lib/src/common/utils.ts";
 
 // export class PeerInstance()
 
@@ -92,7 +92,41 @@ export class PeerCouchDB extends Peer {
     }
     async start(): Promise<void> {
         const baseDir = this.toLocalPath("");
-        const w = await this.man._fetchJson([MILSTONE_DOCID], {}, "get", {}) as Record<string, any>;
+        const w = await this.man.rawGet<Record<string, any>>(MILSTONE_DOCID);
+        if (w && "tweak_values" in w) {
+            if (this.config.useRemoteTweaks) {
+                const tweaks = Object.values(w["tweak_values"])[0] as TweakValues;
+                // console.log(tweaks)
+                const orgConf = { ...this.config } as Record<string, any>;
+                this.config.customChunkSize = tweaks.customChunkSize ?? this.config.customChunkSize;
+                this.config.minimumChunkSize = tweaks.minimumChunkSize ?? this.config.minimumChunkSize;
+                if (tweaks.encrypt && !this.config.passphrase) {
+                    throw new Error("Remote database is encrypted but no passphrase provided.");
+                }
+                if (tweaks.usePathObfuscation && !this.config.obfuscatePassphrase) {
+                    throw new Error("Remote database is obfuscated but no obfuscate passphrase provided.");
+                }
+                this.config.hashAlg = tweaks.hashAlg ?? this.config.hashAlg;
+                this.config.maxAgeInEden = tweaks.maxAgeInEden ?? this.config.maxAgeInEden;
+                this.config.maxTotalLengthInEden = tweaks.maxTotalLengthInEden ?? this.config.maxTotalLengthInEden;
+                this.config.maxChunksInEden = tweaks.maxChunksInEden ?? this.config.maxChunksInEden;
+                this.config.useEden = tweaks.useEden ?? this.config.useEden;
+                if (!this.config.enableCompression != !tweaks.enableCompression) {
+                    throw new Error("Compression setting mismatched.");
+                }
+                this.config.useDynamicIterationCount = tweaks.useDynamicIterationCount ?? this.config.useDynamicIterationCount;
+                this.config.enableChunkSplitterV2 = tweaks.enableChunkSplitterV2 ?? this.config.enableChunkSplitterV2;
+                const newConf = { ...this.config } as Record<string, any>;
+                const diff = unique([...Object.keys(orgConf), ...Object.keys(tweaks)]).filter(k => orgConf[k] != newConf[k]);
+                if (diff.length > 0) {
+                    this.normalLog(`Remote tweaks changed --->`);
+                    for (const diffKey of diff) {
+                        this.normalLog(`${diffKey}\t: ${orgConf[diffKey]} \t : ${newConf[diffKey]}`);
+                    }
+                    this.normalLog(`<--- Remote tweaks changed`);
+                }
+            }
+        }
         const created = w.created;
         if (this.getSetting("remote-created") !== `${created}`) {
             this.man.since = "";

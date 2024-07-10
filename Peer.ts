@@ -1,9 +1,10 @@
 import { join as joinPosix } from "https://deno.land/std@0.203.0/path/posix.ts";
-import { FileInfo } from "./lib/src/DirectFileManipulator.ts";
-import { FilePathWithPrefix, LOG_LEVEL, LOG_LEVEL_DEBUG, LOG_LEVEL_INFO } from "./lib/src/types.ts";
+import type { FileInfo } from "./lib/src/API/DirectFileManipulatorV2.ts";
+
+import { FilePathWithPrefix, LOG_LEVEL, LOG_LEVEL_DEBUG, LOG_LEVEL_INFO } from "./lib/src/common/types.ts";
 import { PeerConf, FileData } from "./types.ts";
-import { Logger } from "./lib/src/logger.ts";
-import { LRUCache } from "./lib/src/LRUCache.ts";
+import { Logger } from "octagonal-wheels/common/logger.js";
+import { LRUCache } from "octagonal-wheels/memory/LRUCache.js"
 import { computeHash } from "./util.ts";
 
 export type DispatchFun = (source: Peer, path: string, data: FileData | false) => Promise<void>;

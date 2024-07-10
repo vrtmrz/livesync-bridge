@@ -8,11 +8,10 @@
             "username": "admin",
             "password": "password",
             "url": "http://localhost:5984",
-            "customChunkSize": 100,
-            "minimumChunkSize": 20,
             "passphrase": "passphrase",
             "obfuscatePassphrase": "passphrase",
-            "baseDir": "blog/"
+            "baseDir": "blog/",
+            "useRemoteTweaks": true
         },
         {
             "type": "couchdb",
@@ -35,12 +34,7 @@
             "baseDir": "./vault/",
             "processor": {
                 "cmd": "cmd",
-                "args": [
-                    "/C",
-                    "script\\test.bat",
-                    "$filename",
-                    "$mode"
-                ]
+                "args": ["/C", "script\\test.bat", "$filename", "$mode"]
             },
             "scanOfflineChanges": true
         },
@@ -51,12 +45,10 @@
             "baseDir": "./vault-linux/",
             "processor": {
                 "cmd": "script/test.sh",
-                "args": [
-                    "$filename",
-                    "$mode"
-                ]
+                "args": ["$filename", "$mode"]
             },
-            "scanOfflineChanges": true
+            "scanOfflineChanges": true,
+            "useChokidar": true
         }
     ]
 }
