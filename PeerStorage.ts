@@ -1,15 +1,15 @@
 import { dirname, resolve } from "https://deno.land/std@0.203.0/path/mod.ts";
-import { LOG_LEVEL_INFO, LOG_LEVEL_NOTICE, LOG_LEVEL_VERBOSE } from "./lib/src/types.ts";
+import { LOG_LEVEL_INFO, LOG_LEVEL_NOTICE, LOG_LEVEL_VERBOSE } from "./lib/src/common/types.ts";
 import { PeerStorageConf, FileData } from "./types.ts";
-import { Logger } from "./lib/src/logger.ts";
-import { delay, getDocData } from "./lib/src/utils.ts";
-import { isPlainText } from "./lib/src/path.ts";
+import { Logger } from "./lib/src/common/logger.ts";
+import { delay, getDocData } from "./lib/src/common/utils.ts";
+import { isPlainText } from "./lib/src/string_and_binary/path.ts";
 import { posixParse } from "https://deno.land/std@0.203.0/path/_parse.ts";
 import { relative } from "https://deno.land/std@0.203.0/path/relative.ts";
 import { format } from "https://deno.land/std@0.203.0/path/format.ts";
 import { parse } from "https://deno.land/std@0.203.0/path/parse.ts";
 import { posixFormat } from "https://deno.land/std@0.203.0/path/_format.ts";
-import { scheduleOnceIfDuplicated } from "./lib/src/lock.ts";
+import { scheduleOnceIfDuplicated } from "./lib/src/concurrency/lock.ts";
 import { DispatchFun, Peer } from "./Peer.ts";
 
 import chokidar from "npm:chokidar";

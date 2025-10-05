@@ -1,10 +1,10 @@
-import { DirectFileManipulator, FileInfo, MetaEntry, ReadyEntry } from "./lib/src/DirectFileManipulator.ts";
-import { FilePathWithPrefix, LOG_LEVEL_NOTICE, MILSTONE_DOCID } from "./lib/src/types.ts";
+import { DirectFileManipulator, FileInfo, MetaEntry, ReadyEntry } from "./lib/src/API/DirectFileManipulator.ts";
+import { FilePathWithPrefix, LOG_LEVEL_NOTICE, MILSTONE_DOCID } from "./lib/src/common/types.ts";
 import { PeerCouchDBConf, FileData } from "./types.ts";
-import { decodeBinary } from "./lib/src/strbin.ts";
-import { isPlainText } from "./lib/src/path.ts";
+import { decodeBinary } from "./lib/src/string_and_binary/convert.ts";
+import { isPlainText } from "./lib/src/string_and_binary/path.ts";
 import { DispatchFun, Peer } from "./Peer.ts";
-import { createBinaryBlob, createTextBlob, isDocContentSame } from "./lib/src/utils.ts";
+import { createBinaryBlob, createTextBlob, isDocContentSame } from "./lib/src/common/utils.ts";
 
 // export class PeerInstance()
 

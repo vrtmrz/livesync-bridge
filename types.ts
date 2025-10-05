@@ -1,4 +1,4 @@
-import { DirectFileManipulatorOptions } from "./lib/src/DirectFileManipulator.ts";
+import { DirectFileManipulatorOptions } from "./lib/src/API/DirectFileManipulator.ts";
 
 export interface Config {
     peers: PeerConf[];
