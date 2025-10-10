@@ -20,6 +20,18 @@ export class PeerStorage extends Peer {
         super(conf, dispatcher);
     }
 
+    /**
+     * Deletes a file from the local storage.
+     * 
+     * Flow:
+     * 1. Convert path to local format, then to storage-specific format
+     * 2. Check if this deletion is a repeat operation (avoids loops)
+     * 3. Delete the file from disk
+     * 4. Run any configured post-processing scripts
+     * 
+     * @param pathSrc - Source path (global format)
+     * @returns true if deletion succeeded, false if skipped or failed
+     */
     async delete(pathSrc: string): Promise<boolean> {
         const lp = this.toLocalPath(pathSrc);
         const path = this.toStoragePath(lp);
@@ -37,6 +49,27 @@ export class PeerStorage extends Peer {
         this.runScript(path, true);
         return true;
     }
+    /**
+     * Writes a file to local storage (called when receiving changes from other peers).
+     * 
+     * Flow:
+     * 1. Convert path to local format, then to storage-specific format
+     * 2. Check if this is a repeat operation using isRepeating()
+     *    - isRepeating() will update the cache with the new file hash
+     *    - This prevents loops when our own watcher detects this write
+     * 3. Create necessary directories
+     * 4. Write file data to disk
+     * 5. Set file modification time
+     * 6. Update file stat cache (for change detection)
+     * 7. Run any configured post-processing scripts
+     * 
+     * Note: After this write, the file watcher will detect the change and call dispatch().
+     * However, dispatch() will find the same hash in the cache (from step 2) and skip re-dispatching.
+     * 
+     * @param pathSrc - Source path (global format from Hub)
+     * @param data - File data including content and metadata
+     * @returns true if file was written, false if skipped or failed
+     */
     async put(pathSrc: string, data: FileData): Promise<boolean> {
         const lp = this.toLocalPath(pathSrc);
         const path = this.toStoragePath(lp);
@@ -153,6 +186,26 @@ export class PeerStorage extends Peer {
     }
     watcher?: chokidar.FSWatcher;
 
+    /**
+     * Handles file changes detected by the file system watcher.
+     * 
+     * This is called when the file watcher detects a change in the monitored directory.
+     * It can be triggered by:
+     * - External changes (user editing the file)
+     * - Internal changes (this peer's put() writing the file after receiving from Hub)
+     * 
+     * Flow:
+     * 1. Convert the absolute storage path to a relative path
+     * 2. Read the current file data from disk
+     * 3. Schedule processing (debounced to handle rapid changes)
+     * 4. Update file stat cache
+     * 5. Check if this is a repeat using isRepeating()
+     *    - If the file was just written by put(), the hash will match the cache
+     *    - This prevents infinite loops: put() → write → watcher → dispatch → put() → ...
+     * 6. If not a repeat, dispatch to Hub so other peers can sync
+     * 
+     * @param pathSrc - Absolute storage path from file watcher
+     */
     async dispatch(pathSrc: string) {
         const lP = this.toStoragePath(this.toLocalPath("."));
         const path = this.toPosixPath(relative(lP, pathSrc));
@@ -174,13 +227,21 @@ export class PeerStorage extends Peer {
             // }
         });
     }
+    /**
+     * Handles file deletions detected by the file system watcher.
+     * 
+     * Similar to dispatch() but for deletion events.
+     * Checks if the deletion is a repeat (to avoid loops) before notifying the Hub.
+     * 
+     * @param pathSrc - Absolute storage path of deleted file
+     */
     async dispatchDeleted(pathSrc: string) {
         const lP = this.toStoragePath(this.toLocalPath("."));
         const path = this.toPosixPath(relative(lP, pathSrc));
         await scheduleOnceIfDuplicated(pathSrc, async () => {
             await delay(250);
             if (!await this.isRepeating(path, false)) {
-                this.sendLog(`${path} delete detected`);
+                this.sendLog(`${path} deletion detected`);
                 await this.dispatchToHub(this, this.toGlobalPath(path), false);
             }
         });

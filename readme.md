@@ -167,7 +167,8 @@ Totally, all files are synchronized like this:
       "obfuscatePassphrase": "glucose", // Path obfuscation passphrase, if you do not enabled, leave it blank. if enabled, set the same value of passphrase.
       "customChunkSize": 100,
       "minimumChunkSize": 20,
-      "baseDir": "shared/" // Sharing folder
+      "baseDir": "shared/", // Sharing folder
+      "useNormalizedCachePaths": true // Recommended: Prevents infinite loops (default: true)
     },
     {
       "type": "couchdb", // Type should be `couchdb or storage`
@@ -180,7 +181,8 @@ Totally, all files are synchronized like this:
       "obfuscatePassphrase": "cocoa", // Path obfuscation passphrase, if you do not enabled, leave it blank. if enabled, set the same value of passphrase.
       "customChunkSize": 100,
       "minimumChunkSize": 20,
-      "baseDir": "" // Sharing folder
+      "baseDir": "", // Sharing folder
+      "useNormalizedCachePaths": true
     },
     {
       "type": "couchdb",
@@ -193,13 +195,54 @@ Totally, all files are synchronized like this:
       "obfuscatePassphrase": "smock",
       "customChunkSize": 100,
       "minimumChunkSize": 20,
-      "baseDir": "kyouyuu/"
+      "baseDir": "kyouyuu/",
+      "useNormalizedCachePaths": true
     },
     {
       "type": "storage",
       "name": "storage-test1",
-      "baseDir": "./vault/" // The folder which have been synchronised.
+      "baseDir": "./vault/", // The folder which have been synchronised.
+      "useNormalizedCachePaths": true
     }
   ]
 }
 ````
+
+## Configuration Options
+
+### Common Options (All Peer Types)
+
+- `type`: Peer type - either `"couchdb"` or `"storage"`
+- `name`: Unique identifier for this peer
+- `baseDir`: Base directory or folder path for synchronization
+- `group`: (Optional) Group identifier - only peers in the same group sync with each other
+- `useNormalizedCachePaths`: (Optional, default: `true`) Enables path normalization for cache lookups to prevent infinite loops. **Recommended to keep enabled.**
+
+### CouchDB Specific Options
+
+- `url`: CouchDB server URL
+- `database`: Database name
+- `username`: CouchDB username
+- `password`: CouchDB password
+- `passphrase`: E2EE passphrase (leave blank if not using encryption)
+- `obfuscatePassphrase`: Path obfuscation passphrase (same as passphrase if enabled)
+- `customChunkSize`: Custom chunk size for document splitting
+- `minimumChunkSize`: Minimum chunk size
+- `useRemoteTweaks`: (Optional) Use settings from remote database
+
+### Storage Specific Options
+
+- `scanOfflineChanges`: (Optional, default: `false`) Scan for changes that occurred while bridge was offline
+- `useChokidar`: (Optional, default: `false`) Use chokidar library for file watching (may help with compatibility on some systems)
+- `processor`: (Optional) Post-processing script configuration
+  - `cmd`: Command to execute
+  - `args`: Array of arguments (supports `` and `` placeholders)
+
+### Understanding `useNormalizedCachePaths`
+
+This option prevents infinite synchronization loops by ensuring consistent path caching:
+
+- **Enabled (true, recommended)**: Paths are normalized before cache lookups, preventing a peer from re-dispatching its own writes
+- **Disabled (false)**: Uses legacy behavior; may cause loops in certain configurations
+
+For more details, see [SYNCHRONIZATION_LOGIC.md](SYNCHRONIZATION_LOGIC.md).

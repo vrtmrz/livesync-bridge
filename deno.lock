@@ -3,7 +3,9 @@
   "specifiers": {
     "jsr:@std/async@^1.0.12": "1.0.12",
     "jsr:@std/cli@*": "1.0.17",
+    "jsr:@std/cli@^1.0.23": "1.0.23",
     "jsr:@std/fs@^1.0.17": "1.0.17",
+    "jsr:@std/internal@^1.0.12": "1.0.12",
     "jsr:@std/path@*": "1.0.9",
     "jsr:@std/path@^1.0.9": "1.0.9",
     "npm:@types/diff-match-patch@^1.0.36": "1.0.36",
@@ -33,11 +35,20 @@
     "@std/cli@1.0.17": {
       "integrity": "e15b9abe629e17be90cc6216327f03a29eae613365f1353837fa749aad29ce7b"
     },
+    "@std/cli@1.0.23": {
+      "integrity": "bf95b7a9425ba2af1ae5a6359daf58c508f2decf711a76ed2993cd352498ccca",
+      "dependencies": [
+        "jsr:@std/internal"
+      ]
+    },
     "@std/fs@1.0.17": {
       "integrity": "1c00c632677c1158988ef7a004cb16137f870aafdb8163b9dce86ec652f3952b",
       "dependencies": [
         "jsr:@std/path@^1.0.9"
       ]
+    },
+    "@std/internal@1.0.12": {
+      "integrity": "972a634fd5bc34b242024402972cd5143eac68d8dffaca5eaa4dba30ce17b027"
     },
     "@std/path@1.0.9": {
       "integrity": "260a49f11edd3db93dd38350bf9cd1b4d1366afa98e81b86167b4e3dd750129e"
@@ -524,9 +535,24 @@
       "integrity": "sha512-147y/6YNh+tlp6nd/2pWq38i9h6mz/EuQ6njIrmW8D1BS5nCqs0P6DG+m6zTGnNz5I+uhZ0SHxBs9BsPrwcKDA=="
     }
   },
+  "redirects": {
+    "https://esm.sh/@noble/secp256k1@^3.0.0?target=denonext": "https://esm.sh/@noble/secp256k1@3.0.0?target=denonext",
+    "https://esm.sh/gh/vrtmrz/trystero#9e892a93ec14eeb57ce806d272fbb7c3935256d8": "https://esm.sh/gh/vrtmrz/trystero@5a0b034"
+  },
+  "remote": {
+    "https://esm.sh/@noble/secp256k1@3.0.0/denonext/secp256k1.mjs": "e842c9b3d602a482f40bcf7d69f98bbd7fe5e20339ddc49309a3a6d38a1e8de2",
+    "https://esm.sh/@noble/secp256k1@3.0.0?target=denonext": "2df5bf9904e1a6190f34aac85b21e47f5d4a8c2b32024180bf9c7fb50d954b53",
+    "https://esm.sh/gh/vrtmrz/trystero@5a0b034": "8c8e862e11a757416a8820a7d7f1c9ef04b9e7027539ce3a7221344ed21a13d9",
+    "https://esm.sh/gh/vrtmrz/trystero@5a0b034/denonext/nostr.mjs": "942378e06cb2a19237b19cb533a7848572976196010223398dfb60f3e505e06b",
+    "https://esm.sh/gh/vrtmrz/trystero@5a0b034/denonext/src/crypto.mjs": "c1c178081b4763903dfccca33943d93c5a175ed0eade5aaaa73166ea089f5121",
+    "https://esm.sh/gh/vrtmrz/trystero@5a0b034/denonext/src/strategy.mjs": "e623c60dc56a4fd283ebc42af8b44a9ffc5af8d7ad994113ca1850d4b128d3fd",
+    "https://esm.sh/gh/vrtmrz/trystero@5a0b034/denonext/src/utils.mjs": "5df9497b02fa412b1f5d7b582026a8e35c20f7e2a57af014d9cad016892bbf4d",
+    "https://esm.sh/gh/vrtmrz/trystero@5a0b034/denonext/trystero.mjs": "0a1e0cf69155aae27e7800e49e0a1e35728115e7dd9610cd78d7695beaee1983"
+  },
   "workspace": {
     "dependencies": [
       "jsr:@std/async@^1.0.12",
+      "jsr:@std/cli@^1.0.23",
       "jsr:@std/fs@^1.0.17",
       "jsr:@std/path@^1.0.9",
       "npm:@types/diff-match-patch@^1.0.36",
