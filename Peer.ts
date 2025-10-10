@@ -1,4 +1,4 @@
-import { join as joinPosix } from "jsr:@std/path/posix";
+import { join as joinPosix } from "@std/path/posix";
 import type { FileInfo } from "./lib/src/API/DirectFileManipulatorV2.ts";
 
 import { FilePathWithPrefix, LOG_LEVEL, LOG_LEVEL_DEBUG, LOG_LEVEL_INFO } from "./lib/src/common/types.ts";
@@ -25,12 +25,33 @@ export abstract class Peer {
         return ret;
     }
     toGlobalPath(pathSrc: string) {
-        let path = pathSrc.startsWith("_") ? pathSrc.substring(1) : pathSrc;
-        if (path.startsWith(this.config.baseDir)) {
-            path = path.substring(this.config.baseDir.length);
+        const path = pathSrc.startsWith("_") ? pathSrc.substring(1) : pathSrc;
+        
+        // Normalize the baseDir to handle different path formats
+        let normalizedBaseDir = this.config.baseDir.replace(/\\/g, '/');
+        // Remove leading ./ if present
+        if (normalizedBaseDir.startsWith('./')) {
+            normalizedBaseDir = normalizedBaseDir.substring(2);
         }
-        // this.debugLog(`**TOLOCAL: ${pathSrc} => ${path}`);
-        return path;
+        // Ensure trailing slash for proper prefix matching
+        if (normalizedBaseDir && !normalizedBaseDir.endsWith('/')) {
+            normalizedBaseDir += '/';
+        }
+        
+        // Normalize the input path
+        let normalizedPath = path.replace(/\\/g, '/');
+        // Remove leading ./ if present
+        if (normalizedPath.startsWith('./')) {
+            normalizedPath = normalizedPath.substring(2);
+        }
+        
+        // Remove baseDir prefix if present
+        if (normalizedBaseDir && normalizedPath.startsWith(normalizedBaseDir)) {
+            normalizedPath = normalizedPath.substring(normalizedBaseDir.length);
+        }
+        
+        // this.debugLog(`**TOGLOBAL: ${pathSrc} => ${normalizedPath} (baseDir: ${normalizedBaseDir})`);
+        return normalizedPath;
     }
     abstract delete(path: string): Promise<boolean>;
     abstract put(path: string, data: FileData): Promise<boolean>;
@@ -38,13 +59,78 @@ export abstract class Peer {
     abstract start(): Promise<void>;
     abstract stop(): Promise<void>;
     cache = new LRUCache<string, string>(300, 10000000, true);
+    
+    /**
+     * Normalizes a file path for use as a cache key.
+     * This ensures consistent cache lookups regardless of whether the path
+     * comes from put(), dispatch(), or other sources.
+     * 
+     * The normalization:
+     * 1. Converts the path to a global path format (removes baseDir prefix)
+     * 2. Converts all backslashes to forward slashes (Windows compatibility)
+     * 3. Ensures consistent representation across different code paths
+     * 
+     * This avoids cache misses caused by different path representations:
+     * - "./vault/file.md" vs "file.md"
+     * - "file/path.md" vs "file\path.md" (Windows)
+     * 
+     * @param path - The file path to normalize
+     * @returns Normalized path suitable for cache key (always uses forward slashes)
+     */
+    normalizeCacheKey(path: string): string {
+        // If feature is disabled, return path as-is for backward compatibility
+        if (this.config.useNormalizedCachePaths === false) {
+            return path;
+        }
+        
+        // Convert to global path format to ensure consistency
+        // This removes baseDir prefix and handles underscore prefixes
+        let normalized = this.toGlobalPath(path);
+        
+        // Ensure forward slashes for cross-platform consistency
+        // This is critical on Windows where paths can have backslashes
+        normalized = normalized.replace(/\\/g, '/');
+        
+        return normalized;
+    }
+    
+    /**
+     * Checks if a file operation is a repeat (same content as last processed).
+     * 
+     * This prevents infinite loops in the following scenario:
+     * 1. Peer A detects file change and dispatches to Hub
+     * 2. Hub dispatches to Peer B (and back to Peer A)
+     * 3. Peer A's put() writes the file (same content)
+     * 4. Peer A's file watcher detects the write as a "change"
+     * 5. Without this check, step 1 would repeat infinitely
+     * 
+     * The function:
+     * - Computes a hash of the file data
+     * - Checks if this hash was recently seen for this file path
+     * - Updates the cache with the new hash
+     * - Returns true if the operation should be skipped (repeat detected)
+     * 
+     * @param path - File path (will be normalized for cache lookup)
+     * @param data - File data to check, or false for deletion
+     * @returns true if this is a repeat operation (should skip), false if new
+     */
     async isRepeating(path: string, data: FileData | false) {
+        // Compute hash of the file content (or special marker for deletions)
         const d = await computeHash(data === false ? ["\u0001Deleted"] : data.data);
 
-        if (this.cache.has(path) && this.cache.get(path) == d) {
+        // Normalize the path for consistent cache lookups
+        const normalizedPath = this.normalizeCacheKey(path);
+        
+        // Check if we've recently processed this exact file content
+        if (this.cache.has(normalizedPath) && this.cache.get(normalizedPath) == d) {
+            this.normalLog(` Skipped (Repeat) ${path}: ${d?.substring(0, 6)} (cached: ${this.cache.get(normalizedPath)?.substring(0, 6)}, normalized: ${normalizedPath})`);
             return true;
         }
-        this.cache.set(path, d);
+
+        this.normalLog(`Cache miss for ${path}: ${d?.substring(0, 6)} (previous: ${this.cache.get(normalizedPath)?.substring(0, 6)}, normalized: ${normalizedPath})`);
+
+        // Update cache with new hash for this file
+        this.cache.set(normalizedPath, d);
         return false;
     }
     receiveLog(message: string, level?: LOG_LEVEL) {

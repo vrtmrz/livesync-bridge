@@ -2,7 +2,7 @@ import { defaultLoggerEnv } from "./lib/src/common/logger.ts";
 import { LOG_LEVEL_DEBUG } from "./lib/src/common/logger.ts";
 import { Hub } from "./Hub.ts";
 import { Config } from "./types.ts";
-import { parseArgs } from "jsr:@std/cli";
+import { parseArgs } from "@std/cli/parse-args";
 
 const KEY = "LSB_"
 defaultLoggerEnv.minLogLevel = LOG_LEVEL_DEBUG;

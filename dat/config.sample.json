@@ -11,7 +11,8 @@
             "passphrase": "passphrase",
             "obfuscatePassphrase": "passphrase",
             "baseDir": "blog/",
-            "useRemoteTweaks": true
+            "useRemoteTweaks": true,
+            "useNormalizedCachePaths": true
         },
         {
             "type": "couchdb",
@@ -25,7 +26,8 @@
             "customChunkSize": 100,
             "minimumChunkSize": 20,
             "obfuscatePassphrase": "passphrase",
-            "baseDir": "syncLinux/"
+            "baseDir": "syncLinux/",
+            "useNormalizedCachePaths": true
         },
         {
             "type": "storage",
@@ -36,7 +38,8 @@
                 "cmd": "cmd",
                 "args": ["/C", "script\\test.bat", "$filename", "$mode"]
             },
-            "scanOfflineChanges": true
+            "scanOfflineChanges": true,
+            "useNormalizedCachePaths": true
         },
         {
             "type": "storage",
@@ -48,7 +51,8 @@
                 "args": ["$filename", "$mode"]
             },
             "scanOfflineChanges": true,
-            "useChokidar": true
+            "useChokidar": true,
+            "useNormalizedCachePaths": true
         }
     ]
 }

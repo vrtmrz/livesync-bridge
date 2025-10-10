@@ -16,6 +16,12 @@ export interface PeerStorageConf {
         args: string[]
     }
     useChokidar?: boolean;
+    /**
+     * When enabled, normalizes file paths before cache lookups to prevent infinite loops
+     * where a peer's own file write triggers another dispatch cycle.
+     * Default: true (recommended)
+     */
+    useNormalizedCachePaths?: boolean;
 }
 export interface PeerCouchDBConf extends DirectFileManipulatorOptions {
     type: "couchdb";
@@ -31,6 +37,12 @@ export interface PeerCouchDBConf extends DirectFileManipulatorOptions {
     passphrase: string;
     obfuscatePassphrase: string;
     baseDir: string;
+    /**
+     * When enabled, normalizes file paths before cache lookups to prevent infinite loops
+     * where a peer's own document update triggers another dispatch cycle.
+     * Default: true (recommended)
+     */
+    useNormalizedCachePaths?: boolean;
 }
 
 
