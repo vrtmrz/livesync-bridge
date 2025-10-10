@@ -122,12 +122,13 @@ export abstract class Peer {
         const normalizedPath = this.normalizeCacheKey(path);
         
         // Check if we've recently processed this exact file content
-        if (this.cache.has(normalizedPath) && this.cache.get(normalizedPath) == d) {
-            this.normalLog(` Skipped (Repeat) ${path}: ${d?.substring(0, 6)} (cached: ${this.cache.get(normalizedPath)?.substring(0, 6)}, normalized: ${normalizedPath})`);
+        const cachedValue = this.cache.get(normalizedPath);
+        if (this.cache.has(normalizedPath) && cachedValue == d) {
+            this.normalLog(` Skipped (Repeat) ${path}: ${d?.substring(0, 6)} (cached: ${cachedValue?.substring(0, 6)}, normalized: ${normalizedPath})`);
             return true;
         }
 
-        this.normalLog(`Cache miss for ${path}: ${d?.substring(0, 6)} (previous: ${this.cache.get(normalizedPath)?.substring(0, 6)}, normalized: ${normalizedPath})`);
+        this.normalLog(`Cache miss for ${path}: ${d?.substring(0, 6)} (previous: ${cachedValue?.substring(0, 6)}, normalized: ${normalizedPath})`);
 
         // Update cache with new hash for this file
         this.cache.set(normalizedPath, d);

@@ -14,7 +14,7 @@ export interface PeerStorageConf {
     processor?: {
         cmd: string,
         args: string[]
-    }
+    };
     useChokidar?: boolean;
     /**
      * When enabled, normalizes file paths before cache lookups to prevent infinite loops
