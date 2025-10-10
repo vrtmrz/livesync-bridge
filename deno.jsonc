@@ -6,6 +6,7 @@
     "imports": {
         "./lib/src/worker/bgWorker.ts": "./lib/src/worker/bgWorker.mock.ts",
         "./lib/src/worker/bgWorker": "./lib/src/worker/bgWorker.mock.ts",
+        "@std/cli": "jsr:@std/cli@^1.0.23",
         "fs/walk": "jsr:@std/fs@^1.0.17/",
         "@std/async": "jsr:@std/async@^1.0.12",
         "@std/path": "jsr:@std/path@^1.0.9",
@@ -27,7 +28,8 @@
         "pouchdb-mapreduce": "npm:pouchdb-mapreduce@^9.0.0",
         "transform-pouch": "npm:transform-pouch@^2.0.0",
         "chokidar": "npm:chokidar@^3.5.1",
-        "trystero": "https://github.com/vrtmrz/vrtmrz/trystero#9e892a93ec14eeb57ce806d272fbb7c3935256d8"
+        // Changed 'trystero' import from GitHub URL to esm.sh for better compatibility with Deno's module resolution and caching.
+        "trystero": "https://esm.sh/gh/vrtmrz/trystero#9e892a93ec14eeb57ce806d272fbb7c3935256d8"
     },
     "lint": {
         "rules": {

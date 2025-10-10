@@ -17,6 +17,17 @@ export class PeerCouchDB extends Peer {
         // Fetch remote since.
         this.man.since = this.getSetting("since") || "now";
     }
+    /**
+     * Deletes a document from CouchDB.
+     * 
+     * Flow:
+     * 1. Convert path to local format
+     * 2. Check if this deletion is a repeat operation (avoids loops)
+     * 3. Delete the document from the database
+     * 
+     * @param pathSrc - Source path (global format)
+     * @returns true if deletion succeeded, false if skipped or failed
+     */
     async delete(pathSrc: string): Promise<boolean> {
         const path = this.toLocalPath(pathSrc);
         if (await this.isRepeating(pathSrc, false)) {
@@ -30,6 +41,25 @@ export class PeerCouchDB extends Peer {
         }
         return r;
     }
+    /**
+     * Writes a document to CouchDB (called when receiving changes from other peers).
+     * 
+     * Flow:
+     * 1. Convert path to local format
+     * 2. Check if this is a repeat operation using isRepeating()
+     *    - isRepeating() will update the cache with the new document hash
+     *    - This prevents loops when the database watcher detects this write
+     * 3. Get existing document metadata (if any)
+     * 4. Compare timestamps and content to avoid unnecessary updates
+     * 5. Write document to CouchDB
+     * 
+     * Note: After this write, the CouchDB watcher (beginWatch) will detect the change.
+     * However, dispatch() will find the same hash in the cache (from step 2) and skip re-dispatching.
+     * 
+     * @param pathSrc - Source path (global format from Hub)
+     * @param data - File data including content and metadata
+     * @returns true if document was written, false if skipped or failed
+     */
     async put(pathSrc: string, data: FileData): Promise<boolean> {
         const path = this.toLocalPath(pathSrc);
         if (await this.isRepeating(pathSrc, data)) {
@@ -170,6 +200,24 @@ export class PeerCouchDB extends Peer {
             return entry.path.startsWith(baseDir);
         });
     }
+    /**
+     * Handles document changes detected by the CouchDB watcher (beginWatch).
+     * 
+     * This is called when the database watcher detects a change.
+     * It can be triggered by:
+     * - External changes (another client updating the database)
+     * - Internal changes (this peer's put() writing the document after receiving from Hub)
+     * 
+     * Flow:
+     * 1. Extract relative path from the full document path
+     * 2. Check if this is a repeat using isRepeating()
+     *    - If the document was just written by put(), the hash will match the cache
+     *    - This prevents infinite loops: put() → write → watcher → dispatch → put() → ...
+     * 3. If not a repeat, dispatch to Hub so other peers can sync
+     * 
+     * @param path - Relative path of the changed document
+     * @param data - Document data or false if not available
+     */
     async dispatch(path: string, data: FileData | false) {
         if (data === false) return;
         if (!await this.isRepeating(path, data)) {
@@ -179,6 +227,14 @@ export class PeerCouchDB extends Peer {
         //     this.receiveLog(`${path} dispatch repeating`);
         // }
     }
+    /**
+     * Handles document deletions detected by the CouchDB watcher.
+     * 
+     * Similar to dispatch() but for deletion events.
+     * Checks if the deletion is a repeat (to avoid loops) before notifying the Hub.
+     * 
+     * @param path - Relative path of the deleted document
+     */
     async dispatchDeleted(path: string) {
         if (!await this.isRepeating(path, false)) {
             await this.dispatchToHub(this, this.toGlobalPath(path), false);
