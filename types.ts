@@ -16,6 +16,8 @@ export interface PeerStorageConf {
         args: string[]
     }
     useChokidar?: boolean;
+    /** Glob patterns to ignore (e.g., ["**\/.git/**", "node_modules/**"]) */
+    ignore?: string[];
 }
 export interface PeerCouchDBConf extends DirectFileManipulatorOptions {
     type: "couchdb";

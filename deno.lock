@@ -14,6 +14,7 @@
     "npm:diff-match-patch@^1.0.5": "1.0.5",
     "npm:fflate@~0.8.2": "0.8.2",
     "npm:minimatch@*": "10.0.1",
+    "npm:node-fetch-native@^1.6.4": "1.6.7",
     "npm:octagonal-wheels@~0.1.39": "0.1.39",
     "npm:pouchdb-adapter-http@9": "9.0.0",
     "npm:pouchdb-core@9": "9.0.0",
@@ -288,6 +289,9 @@
         "brace-expansion"
       ]
     },
+    "node-fetch-native@1.6.7": {
+      "integrity": "sha512-g9yhqoedzIUm0nTnTqAQvueMPVOuIY16bqgAJJC8XOOubYFNwz6IER9qs0Gq2Xd0+CecCKFjtdDTMA4u4xG06Q=="
+    },
     "node-fetch@2.6.9": {
       "integrity": "sha512-DJm/CJkZkRjKKj4Zi4BsKVZh3ValV5IR5s7LVZnW+6YMh0W1BfNA8XSs6DLMGYlId5F3KnA70uu2qepcR08Qqg==",
       "dependencies": [
@@ -524,6 +528,19 @@
       "integrity": "sha512-147y/6YNh+tlp6nd/2pWq38i9h6mz/EuQ6njIrmW8D1BS5nCqs0P6DG+m6zTGnNz5I+uhZ0SHxBs9BsPrwcKDA=="
     }
   },
+  "redirects": {
+    "https://esm.sh/@noble/secp256k1@^3.0.0?target=denonext": "https://esm.sh/@noble/secp256k1@3.0.0?target=denonext"
+  },
+  "remote": {
+    "https://esm.sh/@noble/secp256k1@3.0.0/denonext/secp256k1.mjs": "e842c9b3d602a482f40bcf7d69f98bbd7fe5e20339ddc49309a3a6d38a1e8de2",
+    "https://esm.sh/@noble/secp256k1@3.0.0?target=denonext": "2df5bf9904e1a6190f34aac85b21e47f5d4a8c2b32024180bf9c7fb50d954b53",
+    "https://esm.sh/gh/vrtmrz/trystero@9e892a93ec14eeb57ce806d272fbb7c3935256d8": "e64b036faf014a715bfb45d2f22d62b6031f5e88549ab8027157698e12552ef8",
+    "https://esm.sh/gh/vrtmrz/trystero@9e892a93ec14eeb57ce806d272fbb7c3935256d8/denonext/nostr.mjs": "eb15fcac98d11a2ca58751809fca36ed013769ba4972399d8fb876abba57ff06",
+    "https://esm.sh/gh/vrtmrz/trystero@9e892a93ec14eeb57ce806d272fbb7c3935256d8/denonext/src/crypto.mjs": "5bab9b375188a6c3dcc2a5727339514faf32455e7c0f4375f6e8169a04279688",
+    "https://esm.sh/gh/vrtmrz/trystero@9e892a93ec14eeb57ce806d272fbb7c3935256d8/denonext/src/strategy.mjs": "3cdf36d0d4b9cffc7dc50720576566fb69b359f965da23234c307472a0df0202",
+    "https://esm.sh/gh/vrtmrz/trystero@9e892a93ec14eeb57ce806d272fbb7c3935256d8/denonext/src/utils.mjs": "448f03751e8125a2f3397626f29fa071b785ea9888529ee0b6b5ce851eacaea8",
+    "https://esm.sh/gh/vrtmrz/trystero@9e892a93ec14eeb57ce806d272fbb7c3935256d8/denonext/trystero.mjs": "de6f9b4ba9134ae1b71712bd17ae12437aaa21a70c0e03147f460cee0d9a585f"
+  },
   "workspace": {
     "dependencies": [
       "jsr:@std/async@^1.0.12",
@@ -535,6 +552,7 @@
       "npm:diff-match-patch@^1.0.5",
       "npm:fflate@~0.8.2",
       "npm:minimatch@*",
+      "npm:node-fetch-native@^1.6.4",
       "npm:octagonal-wheels@~0.1.39",
       "npm:pouchdb-adapter-http@9",
       "npm:pouchdb-core@9",

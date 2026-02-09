@@ -27,4 +27,4 @@ try {
 }
 console.log("LiveSync Bridge is now started!");
 const hub = new Hub(config);
-hub.start();
+await hub.start();
