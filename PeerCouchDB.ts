@@ -5,6 +5,7 @@ import { decodeBinary } from "./lib/src/string_and_binary/convert.ts";
 import { isPlainText } from "./lib/src/string_and_binary/path.ts";
 import { DispatchFun, Peer } from "./Peer.ts";
 import { createBinaryBlob, createTextBlob, isDocContentSame, unique } from "./lib/src/common/utils.ts";
+import { minimatch } from "minimatch";
 
 // export class PeerInstance()
 
@@ -156,6 +157,9 @@ export class PeerCouchDB extends Peer {
             if (path.startsWith("/")) {
                 path = path.substring(1);
             }
+            if (path.startsWith("i:")) {
+                path = path.substring(2);
+            }
             if (entry.deleted || entry._deleted) {
                 this.sendLog(`${path} delete detected`);
                 await this.dispatchDeleted(path);
@@ -166,7 +170,13 @@ export class PeerCouchDB extends Peer {
             }
         }, (entry) => {
             this.setSetting("since", this.man.since);
-            if (entry.path.indexOf(":") !== -1) return false;
+            if (entry.path.indexOf(":") !== -1) {
+                if (this.config.includeInternal && entry.path.startsWith("i:")) {
+                    const stripped = entry.path.substring(2);
+                    return this.config.includeInternal.some(pattern => minimatch(stripped, pattern, { dot: true }));
+                }
+                return false;
+            }
             return entry.path.startsWith(baseDir);
         });
     }

@@ -18,6 +18,8 @@ export interface PeerStorageConf {
     useChokidar?: boolean;
 }
 export interface PeerCouchDBConf extends DirectFileManipulatorOptions {
+    /** Glob patterns for i:-prefixed (internal) files to sync, e.g. [".claude/**"] */
+    includeInternal?: string[];
     type: "couchdb";
     useRemoteTweaks?: true;
     group?: string;
