@@ -7,8 +7,7 @@ import { parse, format, relative, dirname, resolve } from "@std/path";
 import { format as posixFormat, parse as posixParse } from "@std/path/posix"
 import { scheduleOnceIfDuplicated } from "octagonal-wheels/concurrency/lock";
 import { DispatchFun, Peer } from "./Peer.ts";
-import chokidar from "chokidar";
-import { walk } from 'fs/walk';
+import { walk } from "@std/fs/walk";
 
 import { scheduleTask } from "octagonal-wheels/concurrency/task";
 
@@ -50,7 +49,7 @@ export class PeerStorage extends Peer {
                 await Deno.mkdir(dirName, { recursive: true });
             } catch (ex) {
                 // While recursive is true, mkdir will not raise the `AlreadyExist`.
-                console.log(ex);
+                this.receiveLog(`mkdir failed: ${ex}`, LOG_LEVEL_NOTICE);
             }
             const fp = await Deno.open(path, { read: true, write: true, create: true });
             if (data.data instanceof Uint8Array) {
@@ -151,7 +150,6 @@ export class PeerStorage extends Peer {
         }
         return ret;
     }
-    watcher?: chokidar.FSWatcher;
 
     async dispatch(pathSrc: string) {
         const lP = this.toStoragePath(this.toLocalPath("."));
@@ -207,13 +205,13 @@ export class PeerStorage extends Peer {
             return false;
         }
         const fileStat = `${stat.mtime?.getTime() ?? 0}-${stat.size}`;
-        this.setSetting(key, fileStat);
+        await this.setSetting(key, fileStat);
     }
 
     async isChanged(pathSrc: string) {
         const lp = this.toLocalPath(pathSrc);
         const key = `file-stat-${lp}`;
-        const last = this.getSetting(key);
+        const last = await this.getSetting(key);
         // console.log(`R:${key}`);
         // console.log(`RV:${last}`);
 
@@ -278,54 +276,10 @@ export class PeerStorage extends Peer {
 
     }
     async start() {
-        // For addressing Deno's and chokidar's compatibility issues (especially on Windows), we use Deno's fs watcher as the primary watcher.
-        if (!this.config.useChokidar) {
-            await this.startDenoFsWatch();
-            return;
-        }
-
-        if (this.watcher) {
-            this.watcher.close();
-            this.watcher = undefined;
-        }
-        const lP = this.toStoragePath(this.toLocalPath("."));
-        this.normalLog(`Scan offline changes: ${this.config.scanOfflineChanges ? "Enabled, now starting..." : "Disabled"}`);
-        this.watcher = chokidar.watch(lP,
-            {
-                ignoreInitial: !this.config.scanOfflineChanges,
-                awaitWriteFinish: {
-                    stabilityThreshold: 500,
-                },
-            });
-
-        this.watcher.on("change", async (path) => {
-            const ePath = this.toPosixPath(relative(this.toLocalPath("."), path));
-            if (!await this.isChanged(ePath)) {
-                // this.debugLog(`Not changed: ${ePath}`);
-            } else {
-                this.debugLog(`Changes detected: ${ePath}`);
-                await this.dispatch(path);
-            }
-        })
-        this.watcher.on("add", async (path) => {
-            const ePath = this.toPosixPath(relative(this.toLocalPath("."), path));
-            if (!await this.isChanged(ePath)) {
-                // this.debugLog(`Not changed: ${ePath}`);
-            } else {
-                this.debugLog(`New detected: ${ePath}`);
-                await this.dispatch(path);
-            }
-        })
-        this.watcher.on("unlink", async (path) => {
-            const ePath = this.toPosixPath(relative(this.toLocalPath("."), path));
-            this.debugLog(`Unlink detected: ${ePath}`);
-            await this.dispatchDeleted(path)
-        })
+        await this.startDenoFsWatch();
     }
     async stop() {
-        this.watcher?.close();
         this.watcherDeno?.close();
         this.watcherDeno = undefined;
-        return await Promise.resolve();
     }
 }

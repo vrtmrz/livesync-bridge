@@ -17,6 +17,10 @@ export class Hub {
         this.peers = [];
         for (const peer of this.conf.peers) {
             if (peer.type == "couchdb") {
+                const since = Deno.env.get("LSB_SINCE");
+                if (since) {
+                    (peer as PeerCouchDBConf).since = since;
+                }
                 const p = new PeerCouchDB(peer, this.dispatch.bind(this));
                 this.peers.push(p);
             } else if (peer.type == "storage") {
@@ -27,8 +31,23 @@ export class Hub {
             }
         }
         for (const p of this.peers) {
-            p.start();
+            this.safeStartPeer(p);
         }
+    }
+
+    private safeStartPeer(p: Peer) {
+        setTimeout(() => {
+            try {
+                const result = p.start();
+                if (result && typeof result.then === 'function') {
+                    result.then(() => {}).catch((ex) => {
+                        console.error(`Peer ${p.config.name} stopped: ${ex}`);
+                    });
+                }
+            } catch (ex) {
+                console.error(`Failed to start peer ${p.config.name}: ${ex}`);
+            }
+        }, 100);
     }
 
     async dispatch(source: Peer, path: string, data: FileData | false) {

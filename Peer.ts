@@ -9,6 +9,16 @@ import { computeHash } from "./util.ts";
 
 export type DispatchFun = (source: Peer, path: string, data: FileData | false) => Promise<void>;
 
+// Deno KV store for persistent settings (replaces localStorage)
+let kv: Deno.KvStore | null = null;
+
+async function getKv(): Promise<Deno.KvStore> {
+    if (!kv) {
+        kv = await Deno.openKv();
+    }
+    return kv;
+}
+
 export abstract class Peer {
     config: PeerConf;
     // hub: Hub;
@@ -25,7 +35,7 @@ export abstract class Peer {
         return ret;
     }
     toGlobalPath(pathSrc: string) {
-        let path = pathSrc.startsWith("_") ? pathSrc.substring(1) : pathSrc;
+        let path = pathSrc;
         if (path.startsWith(this.config.baseDir)) {
             path = path.substring(this.config.baseDir.length);
         }
@@ -62,11 +72,14 @@ export abstract class Peer {
     _getKey(key: string) {
         return `${this.config.name}-${this.config.type}-${this.config.baseDir}-${key}`;
     }
-    setSetting(key: string, value: string) {
-        return localStorage.setItem(this._getKey(key), value);
+    async setSetting(key: string, value: string) {
+        const store = await getKv();
+        await store.set([this._getKey(key)], value);
     }
-    getSetting(key: string) {
-        return localStorage.getItem(this._getKey(key));
+    async getSetting(key: string): Promise<string | null> {
+        const store = await getKv();
+        const result = await store.get<string>([this._getKey(key)]);
+        return result.value ?? null;
     }
     compareDate(a: FileInfo, b: FileInfo) {
         const aMTime = ~~(a?.mtime ?? 0 / 1000);

@@ -4,10 +4,13 @@
         "run": "deno run -A main.ts"
     },
     "imports": {
+        "@/": "./lib/src/",
+        "@lib/": "./lib/src/",
         "./lib/src/worker/bgWorker.ts": "./lib/src/worker/bgWorker.mock.ts",
         "./lib/src/worker/bgWorker": "./lib/src/worker/bgWorker.mock.ts",
         "fs/walk": "jsr:@std/fs@^1.0.17/",
         "@std/async": "jsr:@std/async@^1.0.12",
+        "@std/fs": "jsr:@std/fs@^1.0.17",
         "@std/path": "jsr:@std/path@^1.0.9",
         "@types/diff-match-patch": "npm:@types/diff-match-patch@^1.0.36",
         "@types/pouchdb": "npm:@types/pouchdb@^6.4.2",
@@ -34,6 +37,6 @@
             "exclude": ["no-explicit-any", "ban-ts-comment"]
         }
     },
-    "nodeModulesDir": "manual",
+    "nodeModulesDir": "auto",
     "unstable": ["bare-node-builtins", "sloppy-imports", "byonm"]
 }

@@ -2,7 +2,7 @@ import { DirectFileManipulator, FileInfo, MetaEntry, ReadyEntry } from "./lib/sr
 import { FilePathWithPrefix, LOG_LEVEL_NOTICE, MILESTONE_DOCID, TweakValues } from "./lib/src/common/types.ts";
 import { PeerCouchDBConf, FileData } from "./types.ts";
 import { decodeBinary } from "./lib/src/string_and_binary/convert.ts";
-import { isPlainText } from "./lib/src/string_and_binary/path.ts";
+import { isPlainText, stripAllPrefixes } from "./lib/src/string_and_binary/path.ts";
 import { DispatchFun, Peer } from "./Peer.ts";
 import { createBinaryBlob, createTextBlob, isDocContentSame, unique } from "./lib/src/common/utils.ts";
 
@@ -14,8 +14,6 @@ export class PeerCouchDB extends Peer {
     constructor(conf: PeerCouchDBConf, dispatcher: DispatchFun) {
         super(conf, dispatcher);
         this.man = new DirectFileManipulator(conf);
-        // Fetch remote since.
-        this.man.since = this.getSetting("since") || "now";
     }
     async delete(pathSrc: string): Promise<boolean> {
         const path = this.toLocalPath(pathSrc);
@@ -139,15 +137,20 @@ export class PeerCouchDB extends Peer {
         }
         if (!w) {
             this.normalLog(`Remote database looks like empty. fetch from the first.`);
-            this.setSetting("remote-created", "0");
+            await this.setSetting("remote-created", "0");
             return;
         }
         const created = w.created;
-        if (this.getSetting("remote-created") !== `${created}`) {
+        if (await this.getSetting("remote-created") !== `${created}`) {
             this.man.since = "";
             this.normalLog(`Remote database looks like rebuilt. fetch from the first again.`);
-            this.setSetting("remote-created", `${created}`);
+            await this.setSetting("remote-created", `${created}`);
         } else {
+            if (this.config.since !== undefined) {
+                this.man.since = this.config.since;
+            } else {
+                this.man.since = await this.getSetting("since") || "now";
+            }
             this.normalLog(`Watch starting from ${this.man.since}`);
         }
         this.man.beginWatch(async (entry) => {
@@ -156,6 +159,7 @@ export class PeerCouchDB extends Peer {
             if (path.startsWith("/")) {
                 path = path.substring(1);
             }
+            path = stripAllPrefixes(path as FilePathWithPrefix) as string;
             if (entry.deleted || entry._deleted) {
                 this.sendLog(`${path} delete detected`);
                 await this.dispatchDeleted(path);
@@ -164,8 +168,8 @@ export class PeerCouchDB extends Peer {
                 this.sendLog(`${path} change detected`);
                 await this.dispatch(path, docData);
             }
-        }, (entry) => {
-            this.setSetting("since", this.man.since);
+        }, async (entry) => {
+            await this.setSetting("since", this.man.since);
             if (entry.path.indexOf(":") !== -1) return false;
             return entry.path.startsWith(baseDir);
         });

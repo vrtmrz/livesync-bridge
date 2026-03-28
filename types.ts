@@ -31,6 +31,7 @@ export interface PeerCouchDBConf extends DirectFileManipulatorOptions {
     passphrase: string;
     obfuscatePassphrase: string;
     baseDir: string;
+    since?: string;
 }
 
 

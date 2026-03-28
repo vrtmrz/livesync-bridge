@@ -6,3 +6,5 @@ services:
       - ./data:/app/data
       - ./dat:/app/dat
     restart: unless-stopped
+    environment:
+      - LSB_CONFIG=/app/dat/config.json

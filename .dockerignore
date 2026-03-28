@@ -3,3 +3,4 @@ vault*/*
 !.gitempty
 *.log
 node_modules
+lib
