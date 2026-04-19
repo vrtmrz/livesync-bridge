@@ -31,6 +31,14 @@ export interface PeerCouchDBConf extends DirectFileManipulatorOptions {
     passphrase: string;
     obfuscatePassphrase: string;
     baseDir: string;
+    /** Use short-polling instead of PouchDB's live changes feed.
+     *  Enable this when CouchDB is accessed through Cloudflare Tunnel
+     *  or a reverse proxy that kills long-lived HTTP connections. */
+    useShortPolling?: boolean;
+    /** Interval between poll requests in milliseconds (default: 5000). */
+    pollIntervalMs?: number;
+    /** HTTP timeout per poll request in milliseconds (default: 50000). */
+    pollTimeoutMs?: number;
 }
 
 

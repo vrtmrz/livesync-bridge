@@ -11,11 +11,21 @@ import { createBinaryBlob, createTextBlob, isDocContentSame, unique } from "./li
 export class PeerCouchDB extends Peer {
     man: DirectFileManipulator;
     declare config: PeerCouchDBConf;
+    private _pollTimer: ReturnType<typeof setTimeout> | undefined;
+    private _polling = false;
+    private _pollIntervalMs: number;
+    private _pollTimeoutMs: number;
+    private _useShortPolling: boolean;
+
     constructor(conf: PeerCouchDBConf, dispatcher: DispatchFun) {
         super(conf, dispatcher);
         this.man = new DirectFileManipulator(conf);
         // Fetch remote since.
         this.man.since = this.getSetting("since") || "now";
+        // Short-polling config (opt-in for Cloudflare Tunnel / reverse proxy environments)
+        this._useShortPolling = conf.useShortPolling ?? false;
+        this._pollIntervalMs = conf.pollIntervalMs ?? 5000;
+        this._pollTimeoutMs = conf.pollTimeoutMs ?? 50000;
     }
     async delete(pathSrc: string): Promise<boolean> {
         const path = this.toLocalPath(pathSrc);
@@ -150,25 +160,140 @@ export class PeerCouchDB extends Peer {
         } else {
             this.normalLog(`Watch starting from ${this.man.since}`);
         }
-        this.man.beginWatch(async (entry) => {
-            const d = entry.type == "plain" ? entry.data : new Uint8Array(decodeBinary(entry.data));
-            let path = entry.path.substring(baseDir.length);
-            if (path.startsWith("/")) {
-                path = path.substring(1);
+
+        if (this._useShortPolling) {
+            this.normalLog(`Starting short-poll mode (interval=${this._pollIntervalMs}ms, timeout=${this._pollTimeoutMs}ms)`);
+            this._startPolling(baseDir);
+        } else {
+            this.man.beginWatch(async (entry) => {
+                const d = entry.type == "plain" ? entry.data : new Uint8Array(decodeBinary(entry.data));
+                let path = entry.path.substring(baseDir.length);
+                if (path.startsWith("/")) {
+                    path = path.substring(1);
+                }
+                if (entry.deleted || entry._deleted) {
+                    this.sendLog(`${path} delete detected`);
+                    await this.dispatchDeleted(path);
+                } else {
+                    const docData = { ctime: entry.ctime, mtime: entry.mtime, size: entry.size, deleted: entry.deleted || entry._deleted, data: d };
+                    this.sendLog(`${path} change detected`);
+                    await this.dispatch(path, docData);
+                }
+            }, (entry) => {
+                this.setSetting("since", this.man.since);
+                if (entry.path.indexOf(":") !== -1) return false;
+                return entry.path.startsWith(baseDir);
+            });
+        }
+    }
+
+    private _startPolling(baseDir: string) {
+        this._polling = true;
+        const changesUrl = `${this.config.url}/${this.config.database}/_changes`;
+        const authHeader = "Basic " + btoa(`${this.config.username}:${this.config.password}`);
+
+        const poll = async () => {
+            if (!this._polling) return;
+            try {
+                const since = this.man.since || "0";
+                const params = new URLSearchParams({
+                    since: since,
+                    feed: "normal",
+                    include_docs: "true",
+                    filter: "_selector",
+                });
+                const body = JSON.stringify({ selector: { type: { "$ne": "leaf" } } });
+
+                const controller = new AbortController();
+                const fetchTimeout = setTimeout(() => controller.abort(), this._pollTimeoutMs + 10000);
+
+                const resp = await fetch(`${changesUrl}?${params}`, {
+                    method: "POST",
+                    headers: {
+                        "Authorization": authHeader,
+                        "Content-Type": "application/json",
+                    },
+                    body: body,
+                    signal: controller.signal,
+                });
+                clearTimeout(fetchTimeout);
+
+                if (!resp.ok) {
+                    const errBody = await resp.text().catch(() => "");
+                    this.normalLog(`Poll HTTP ${resp.status}: ${errBody.substring(0, 200)}`);
+                    if (this._polling) {
+                        this._pollTimer = setTimeout(poll, this._pollIntervalMs);
+                    }
+                    return;
+                }
+
+                const data = await resp.json();
+                const results = data.results || [];
+
+                for (const change of results) {
+                    if (!this._polling) break;
+                    const doc = change.doc;
+                    if (!doc) continue;
+                    // Skip leaf chunks
+                    if (doc.type === "leaf") continue;
+                    // Skip non-note entries (no path field)
+                    if (!doc.path) continue;
+                    // Check if path is in our base dir
+                    if (doc.path.indexOf(":") !== -1) continue;
+                    const fullPath = doc.path as string;
+                    if (baseDir && !fullPath.startsWith(baseDir)) continue;
+
+                    let path = fullPath.substring(baseDir.length);
+                    if (path.startsWith("/")) {
+                        path = path.substring(1);
+                    }
+
+                    if (doc.deleted || doc._deleted || change.deleted) {
+                        this.sendLog(`${path} delete detected`);
+                        await this.dispatchDeleted(path);
+                    } else {
+                        // Fetch full doc content via DirectFileManipulator
+                        try {
+                            // Retry with delay — chunks may arrive after the doc metadata
+                            let entry: ReadyEntry | false = false;
+                            for (let attempt = 0; attempt < 3; attempt++) {
+                                entry = await this.man.getByMeta(doc) as ReadyEntry;
+                                if (entry && entry.size > 0) break;
+                                if (attempt < 2) await new Promise(r => setTimeout(r, 2000));
+                            }
+                            if (entry) {
+                                const d = entry.type == "plain" ? entry.data : new Uint8Array(decodeBinary(entry.data));
+                                const docData = { ctime: entry.ctime, mtime: entry.mtime, size: entry.size, deleted: entry.deleted || entry._deleted, data: d };
+                                this.sendLog(`${path} change detected`);
+                                await this.dispatch(path, docData);
+                            }
+                        } catch (ex) {
+                            this.normalLog(`Poll: failed to process ${path}: ${ex}`);
+                        }
+                    }
+                }
+
+                // Update since checkpoint
+                if (data.last_seq) {
+                    this.man.since = data.last_seq;
+                    this.setSetting("since", this.man.since);
+                }
+
+            } catch (err) {
+                if (err instanceof DOMException && err.name === "AbortError") {
+                    this.normalLog(`Poll: request aborted (timeout) — will retry`);
+                } else {
+                    this.normalLog(`Poll error: ${err}`);
+                }
             }
-            if (entry.deleted || entry._deleted) {
-                this.sendLog(`${path} delete detected`);
-                await this.dispatchDeleted(path);
-            } else {
-                const docData = { ctime: entry.ctime, mtime: entry.mtime, size: entry.size, deleted: entry.deleted || entry._deleted, data: d };
-                this.sendLog(`${path} change detected`);
-                await this.dispatch(path, docData);
+
+            // Schedule next poll
+            if (this._polling) {
+                this._pollTimer = setTimeout(poll, this._pollIntervalMs);
             }
-        }, (entry) => {
-            this.setSetting("since", this.man.since);
-            if (entry.path.indexOf(":") !== -1) return false;
-            return entry.path.startsWith(baseDir);
-        });
+        };
+
+        poll();
     }
     async dispatch(path: string, data: FileData | false) {
         if (data === false) return;
@@ -185,6 +310,11 @@ export class PeerCouchDB extends Peer {
         }
     }
     async stop(): Promise<void> {
+        this._polling = false;
+        if (this._pollTimer) {
+            clearTimeout(this._pollTimer);
+            this._pollTimer = undefined;
+        }
         this.man.endWatch();
         return await Promise.resolve();
     }
