@@ -24,10 +24,25 @@ const configFile = Deno.env.get(`${KEY}CONFIG`) || "./dat/config.json";
 // in-flight filesystem events — corrupting the sync state (CouchDB has docs
 // disk does not, or vice versa).
 //
-// Swallowing the rejection here is correct: PouchDB's replicator will retry the
-// failed batch on the next change event, and chokidar/scanOfflineChanges will
-// re-emit anything missed. A surviving process is strictly better than a
-// restarted one for sync convergence.
+// Swallowing the rejection here is correct for the *burst* case: PouchDB's
+// replicator will retry the failed batch on the next change event, and
+// chokidar/scanOfflineChanges will re-emit anything missed. A surviving process
+// is strictly better than a restarted one for sync convergence.
+//
+// But we observed a *persistent* failure mode in production: the AsyncWrap
+// error fires inside the changes-feed's socket-create path on every retry,
+// turning the bridge's .on("error") → setTimeout(10s) → beginWatch chain into
+// a tight loop that swallows rejections forever without ever processing a
+// change. The watch never recovers in-process — only a fresh Deno process
+// gets a clean node-fetch socket pool. So we count rejections in a sliding
+// window and trip a circuit breaker: if AsyncWrap fires often enough that the
+// watch is clearly not recovering, exit and let Docker's restart policy bring
+// us up clean. The since-checkpoint persistence in PeerCouchDB ensures we
+// resume mid-stream instead of replaying from "now".
+const ASYNC_WRAP_WINDOW_MS = 5 * 60 * 1000;
+const ASYNC_WRAP_EXIT_THRESHOLD = 30; // ~one per 10s for 5 min == permanently broken
+let asyncWrapCount = 0;
+let asyncWrapWindowStart = Date.now();
 globalThis.addEventListener("unhandledrejection", (event) => {
   const reason = event.reason;
   const message = reason instanceof Error ? reason.message : String(reason);
@@ -37,8 +52,25 @@ globalThis.addEventListener("unhandledrejection", (event) => {
       reason.stack.includes("node-fetch"));
 
   if (isAsyncWrapBug) {
+    const now = Date.now();
+    if (now - asyncWrapWindowStart > ASYNC_WRAP_WINDOW_MS) {
+      asyncWrapCount = 0;
+      asyncWrapWindowStart = now;
+    }
+    asyncWrapCount++;
+    if (asyncWrapCount >= ASYNC_WRAP_EXIT_THRESHOLD) {
+      console.error(
+        `[bridge] AsyncWrap threshold reached (${asyncWrapCount} rejections in ${
+          Math.round((now - asyncWrapWindowStart) / 1000)
+        }s); exiting for Docker restart to get a fresh socket pool.`,
+      );
+      // Don't preventDefault — let the process die. Docker's restart policy
+      // brings us back with clean state; PeerCouchDB resumes from the
+      // persisted since checkpoint.
+      Deno.exit(1);
+    }
     console.error(
-      "[bridge] Swallowed node-fetch/AsyncWrap rejection (see fix/asyncwrap-survive-burst):",
+      `[bridge] Swallowed node-fetch/AsyncWrap rejection (${asyncWrapCount}/${ASYNC_WRAP_EXIT_THRESHOLD} in window):`,
       message,
     );
   } else {

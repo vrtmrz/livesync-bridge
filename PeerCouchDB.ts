@@ -1,3 +1,4 @@
+import { dirname } from "@std/path";
 import { DirectFileManipulator, FileInfo, MetaEntry, ReadyEntry } from "./lib/src/API/DirectFileManipulatorV2.ts";
 import { FilePathWithPrefix, IDPrefixes, LOG_LEVEL_NOTICE, MILESTONE_DOCID, TweakValues } from "./lib/src/common/types.ts";
 import { PeerCouchDBConf, FileData } from "./types.ts";
@@ -11,11 +12,82 @@ import { createBinaryBlob, createTextBlob, isDocContentSame, unique } from "./li
 export class PeerCouchDB extends Peer {
     man: DirectFileManipulator;
     declare config: PeerCouchDBConf;
+    // File-based mirror of the bridge's per-peer state. localStorage is the
+    // legacy backing store but it lives under /deno-dir/ in the container and
+    // doesn't survive Docker restarts; the user's compose file mounts /app/dat
+    // (where config.json lives) as a named volume but not /deno-dir. So we
+    // shadow the two checkpoints that matter for resume-correctness — `since`
+    // (where to pick up the changes feed) and `remote-created` (the DB
+    // generation marker that gates the "fetch from the first again" reset) —
+    // into a small JSON file next to config.json. Other state (file-stat-*
+    // for storage; transient caches) is fine to lose on restart.
+    private persistedState: { since?: string; "remote-created"?: string } = {};
+
     constructor(conf: PeerCouchDBConf, dispatcher: DispatchFun) {
         super(conf, dispatcher);
         this.man = new DirectFileManipulator(conf);
-        // Fetch remote since.
-        this.man.since = this.getSetting("since") || "now";
+        this.persistedState = this.readStateSync();
+        // Resolution order for `since`:
+        //   1. file (survives Docker restarts)
+        //   2. localStorage (legacy, in-container)
+        //   3. "now"
+        this.man.since = this.persistedState.since ?? this.tryGetSetting("since") ?? "now";
+    }
+
+    private get stateFile(): string {
+        const configFile = Deno.env.get("LSB_CONFIG") || "./dat/config.json";
+        const safeName = this.config.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+        return `${dirname(configFile)}/state-${safeName}.json`;
+    }
+
+    private readStateSync(): { since?: string; "remote-created"?: string } {
+        try {
+            return JSON.parse(Deno.readTextFileSync(this.stateFile));
+        } catch (ex) {
+            if (!(ex instanceof Deno.errors.NotFound)) {
+                console.error(`[${this.config.name}] failed to read ${this.stateFile}:`, ex);
+            }
+            return {};
+        }
+    }
+
+    // Wraps localStorage access so a broken/wiped backing store can't crash
+    // start() before we even reach beginWatch.
+    private tryGetSetting(key: string): string | undefined {
+        try {
+            return this.getSetting(key) ?? undefined;
+        } catch (ex) {
+            console.error(`[${this.config.name}] localStorage read failed for ${key}:`, ex);
+            return undefined;
+        }
+    }
+    private trySetSetting(key: string, value: string): void {
+        try {
+            this.setSetting(key, value);
+        } catch (ex) {
+            console.error(`[${this.config.name}] localStorage write failed for ${key}:`, ex);
+        }
+    }
+
+    // Trailing-edge debounce so a burst of changes doesn't translate to a burst
+    // of writes to the volume-mounted state file. Last value within the window
+    // wins, which is what we want for a monotonically advancing checkpoint.
+    private pendingStateWrite?: ReturnType<typeof setTimeout>;
+    private persistStateDebounced(): void {
+        if (this.pendingStateWrite !== undefined) return;
+        this.pendingStateWrite = setTimeout(async () => {
+            this.pendingStateWrite = undefined;
+            const snapshot = JSON.stringify(this.persistedState);
+            try {
+                await Deno.writeTextFile(this.stateFile, snapshot);
+            } catch (ex) {
+                console.error(`[${this.config.name}] failed to write ${this.stateFile}:`, ex);
+            }
+        }, 500);
+    }
+    private persistState<K extends keyof typeof this.persistedState>(key: K, value: string): void {
+        this.persistedState[key] = value;
+        this.persistStateDebounced();
     }
     async delete(pathSrc: string): Promise<boolean> {
         const path = this.toLocalPath(pathSrc);
@@ -139,14 +211,22 @@ export class PeerCouchDB extends Peer {
         }
         if (!w) {
             this.normalLog(`Remote database looks like empty. fetch from the first.`);
-            this.setSetting("remote-created", "0");
+            this.trySetSetting("remote-created", "0");
+            this.persistState("remote-created", "0");
             return;
         }
         const created = w.created;
-        if (this.getSetting("remote-created") !== `${created}`) {
+        // Check the persisted-state mirror FIRST. localStorage may have been
+        // wiped by a container restart even when the remote DB hasn't actually
+        // been rebuilt — relying on it alone would force a "fetch from the
+        // first again" reset on every container restart and undo the since
+        // checkpoint we just loaded from the state file.
+        const knownCreated = this.persistedState["remote-created"] ?? this.tryGetSetting("remote-created");
+        if (knownCreated !== `${created}`) {
             this.man.since = "";
             this.normalLog(`Remote database looks like rebuilt. fetch from the first again.`);
-            this.setSetting("remote-created", `${created}`);
+            this.trySetSetting("remote-created", `${created}`);
+            this.persistState("remote-created", `${created}`);
         } else {
             this.normalLog(`Watch starting from ${this.man.since}`);
         }
@@ -185,10 +265,13 @@ export class PeerCouchDB extends Peer {
             // Advance the resume point AFTER successful processing. If the watch
             // disconnects and reconnects (the .on("error") path retries via
             // setTimeout), beginWatch reads this.since again — without this
-            // update it would replay from the initial value forever.
+            // update it would replay from the initial value forever. We also
+            // persist to a file in dat/ because localStorage lives under
+            // /deno-dir/ in the container and is wiped on Docker restart.
             if (seq !== undefined) {
                 this.man.since = `${seq}`;
-                this.setSetting("since", this.man.since);
+                this.trySetSetting("since", this.man.since);
+                this.persistState("since", this.man.since);
             }
         }, (entry) => {
             if (entry.path.indexOf(":") !== -1) return false;
