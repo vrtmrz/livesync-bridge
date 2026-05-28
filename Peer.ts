@@ -69,8 +69,11 @@ export abstract class Peer {
         return localStorage.getItem(this._getKey(key));
     }
     compareDate(a: FileInfo, b: FileInfo) {
-        const aMTime = ~~(a?.mtime ?? 0 / 1000);
-        const bMTime = ~~(b?.mtime ?? 0 / 1000);
-        return aMTime - bMTime;
+        // Returns the mtime delta in seconds. mtimes are ms since epoch; the
+        // previous version used `~~(mtime ?? 0/1000)` which evaluates as
+        // `~~(mtime ?? 0)` (precedence) and truncates to int32, wrapping past
+        // 2^31 and scrambling the comparison. The caller in PeerCouchDB.put
+        // compares `Math.abs(...) < 3600`, treating the result as seconds.
+        return Math.floor((a?.mtime ?? 0) / 1000) - Math.floor((b?.mtime ?? 0) / 1000);
     }
 }

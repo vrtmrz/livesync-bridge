@@ -23,7 +23,13 @@ export class PeerStorage extends Peer {
     async delete(pathSrc: string): Promise<boolean> {
         const lp = this.toLocalPath(pathSrc);
         const path = this.toStoragePath(lp);
-        if (await this.isRepeating(lp, false)) {
+        // Dedup cache key must match the form used in dispatch()/dispatchDeleted()
+        // (the global, baseDir-less path) so the echo from our own write is detected
+        // and we don't loop. Previously this used `lp` (baseDir-prefixed), which
+        // never matched dispatch's key when baseDir != "", silently breaking loop
+        // prevention. Loop was still caught by isChanged()/the CouchDB content
+        // check, but the cache was effectively dead.
+        if (await this.isRepeating(pathSrc, false)) {
             return false;
         }
         try {
@@ -40,7 +46,8 @@ export class PeerStorage extends Peer {
     async put(pathSrc: string, data: FileData): Promise<boolean> {
         const lp = this.toLocalPath(pathSrc);
         const path = this.toStoragePath(lp);
-        if (await this.isRepeating(lp, data)) {
+        // See note in delete(): cache key must be the global path to match dispatch().
+        if (await this.isRepeating(pathSrc, data)) {
             this.receiveLog(`${lp} save repeating`);
             return false;
         }

@@ -1,5 +1,5 @@
 import { DirectFileManipulator, FileInfo, MetaEntry, ReadyEntry } from "./lib/src/API/DirectFileManipulatorV2.ts";
-import { FilePathWithPrefix, LOG_LEVEL_NOTICE, MILESTONE_DOCID, TweakValues } from "./lib/src/common/types.ts";
+import { FilePathWithPrefix, IDPrefixes, LOG_LEVEL_NOTICE, MILESTONE_DOCID, TweakValues } from "./lib/src/common/types.ts";
 import { PeerCouchDBConf, FileData } from "./types.ts";
 import { decodeBinary } from "./lib/src/string_and_binary/convert.ts";
 import { isPlainText } from "./lib/src/string_and_binary/path.ts";
@@ -150,7 +150,25 @@ export class PeerCouchDB extends Peer {
         } else {
             this.normalLog(`Watch starting from ${this.man.since}`);
         }
-        this.man.beginWatch(async (entry) => {
+        this.man.beginWatch(async (entry, seq) => {
+            // Defensive: catch chunk/_id decoupling before it lands on disk or
+            // gets pushed elsewhere. Symptom we're guarding against: doc A's
+            // change event arrives, but the chunk responses fetched to
+            // materialize its body were cross-wired (e.g. by the node-fetch
+            // AsyncWrap bug under burst) and contain doc B's content. The
+            // bridge would then write B's bytes into /vault/A and, on the
+            // round-trip, push A's metadata pointing at chunks whose hash no
+            // longer matches their ID. Recomputing the chunk hashes catches
+            // this — non-matching means "drop and let the next change retry."
+            if (!entry.deleted && !entry._deleted) {
+                if (!await this.verifyChunkIntegrity(entry)) {
+                    this.normalLog(
+                        ` Dropping change for ${entry.path} (_id=${entry._id.substring(0, 8)}): chunk integrity check failed. Will resume on next change.`,
+                        LOG_LEVEL_NOTICE,
+                    );
+                    return;
+                }
+            }
             const d = entry.type == "plain" ? entry.data : new Uint8Array(decodeBinary(entry.data));
             let path = entry.path.substring(baseDir.length);
             if (path.startsWith("/")) {
@@ -164,8 +182,15 @@ export class PeerCouchDB extends Peer {
                 this.sendLog(`${path} change detected`);
                 await this.dispatch(path, docData);
             }
+            // Advance the resume point AFTER successful processing. If the watch
+            // disconnects and reconnects (the .on("error") path retries via
+            // setTimeout), beginWatch reads this.since again — without this
+            // update it would replay from the initial value forever.
+            if (seq !== undefined) {
+                this.man.since = `${seq}`;
+                this.setSetting("since", this.man.since);
+            }
         }, (entry) => {
-            this.setSetting("since", this.man.since);
             if (entry.path.indexOf(":") !== -1) return false;
             return entry.path.startsWith(baseDir);
         });
@@ -187,5 +212,46 @@ export class PeerCouchDB extends Peer {
     async stop(): Promise<void> {
         this.man.endWatch();
         return await Promise.resolve();
+    }
+
+    /**
+     * Recompute each chunk's hash and confirm it matches the ID in `entry.children`.
+     * Chunk IDs are `${IDPrefixes.Chunk}${hashManager.computeHash(piece)}`, and
+     * hashManager.computeHash already prefixes the encryption marker when
+     * encryption is enabled — so the same equation works for both modes.
+     *
+     * Returns true if integrity is OK (or unverifiable for a benign reason).
+     * Returns false ONLY when a concrete mismatch is detected.
+     */
+    private async verifyChunkIntegrity(entry: ReadyEntry): Promise<boolean> {
+        const hashManager = this.man.liveSyncLocalDB?.managers?.hashManager;
+        if (!hashManager) return true;
+        const children = entry.children ?? [];
+        const data = entry.data ?? [];
+        // Inline notes (legacy) have empty children and a single concatenated
+        // body; nothing to verify against per-chunk.
+        if (children.length === 0) return true;
+        if (children.length !== data.length) {
+            this.normalLog(
+                ` Chunk integrity: children/data length mismatch (${children.length} vs ${data.length}) for ${entry.path}`,
+                LOG_LEVEL_NOTICE,
+            );
+            return false;
+        }
+        for (let i = 0; i < children.length; i++) {
+            const expected = children[i];
+            const piece = data[i];
+            if (typeof piece !== "string") continue;
+            const hash = await hashManager.computeHash(piece);
+            const actual = `${IDPrefixes.Chunk}${hash}`;
+            if (actual !== expected) {
+                this.normalLog(
+                    ` Chunk integrity: hash mismatch at index ${i} for ${entry.path}: expected ${expected}, computed ${actual}`,
+                    LOG_LEVEL_NOTICE,
+                );
+                return false;
+            }
+        }
+        return true;
     }
 }
