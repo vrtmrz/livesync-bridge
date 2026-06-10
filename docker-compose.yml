@@ -1,7 +1,9 @@
 version: "2.1"
+name: "obsidian-livesync-bridge"
 services:
   bridge:
     build: .
+    image: localhost/livesync-bridge:latest
     volumes:
       - ./data:/app/data
       - ./dat:/app/dat

@@ -25,7 +25,7 @@ export abstract class Peer {
         return ret;
     }
     toGlobalPath(pathSrc: string) {
-        let path = pathSrc.startsWith("_") ? pathSrc.substring(1) : pathSrc;
+        let path = pathSrc.startsWith("/") ? pathSrc.substring(1) : pathSrc;
         if (path.startsWith(this.config.baseDir)) {
             path = path.substring(this.config.baseDir.length);
         }
