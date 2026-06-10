@@ -1,9 +1,11 @@
 name: build-push
 
 # Build the bridge image and push it to GHCR on every push to main. noema's
-# Quadlet unit tracks ghcr.io/echthesia/livesync-bridge:production (a moving tag)
-# with AutoUpdate=registry, so a push here → new :production digest → the host's
+# Quadlet unit tracks ghcr.io/echthesia/livesync-bridge:latest (a moving tag)
+# with AutoUpdate=registry, so a push here → new :latest digest → the host's
 # podman-auto-update.timer rolls it out (with healthcheck-gated rollback).
+# :latest = head of main, continuously deployed (no promotion gate); :sha pins
+# each build for provenance/rollback.
 on:
   push:
     branches: [main]
@@ -38,7 +40,7 @@ jobs:
         with:
           images: ghcr.io/echthesia/livesync-bridge
           tags: |
-            type=raw,value=production
+            type=raw,value=latest
             type=sha
 
       - name: Build and push
