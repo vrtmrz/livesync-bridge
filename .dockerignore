@@ -3,3 +3,9 @@ vault*/*
 !.gitempty
 *.log
 node_modules
+# Runtime sync data — must never enter the image (COPY . . would otherwise bake
+# synced vault content). Untracked in git, but exclude from the build context too.
+data/
+# Build-context hygiene: don't bake git history or CI config into the image.
+.git
+.github

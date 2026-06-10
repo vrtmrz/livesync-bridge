@@ -1,0 +1,51 @@
+name: build-push
+
+# Build the bridge image and push it to GHCR on every push to main. noema's
+# Quadlet unit tracks ghcr.io/echthesia/livesync-bridge:production (a moving tag)
+# with AutoUpdate=registry, so a push here → new :production digest → the host's
+# podman-auto-update.timer rolls it out (with healthcheck-gated rollback).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The deno app imports from the `lib` submodule (vrtmrz/livesync-commonlib);
+          # the Dockerfile's `COPY . .` needs it populated or the build is broken.
+          submodules: recursive
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/echthesia/livesync-bridge
+          tags: |
+            type=raw,value=production
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

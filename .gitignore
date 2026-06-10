@@ -4,3 +4,5 @@ vault*/*
 !*.sample.json
 *.log
 node_modules
+# Runtime sync data dir (created at deploy time; never commit synced content).
+data/
