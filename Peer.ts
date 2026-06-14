@@ -25,7 +25,11 @@ export abstract class Peer {
         return ret;
     }
     toGlobalPath(pathSrc: string) {
-        let path = pathSrc.startsWith("_") ? pathSrc.substring(1) : pathSrc;
+        // toLocalPath escapes a leading "_" as "/_" (PouchDB IDs must not start
+        // with "_"). The inverse must strip that leading "/", NOT the "_" —
+        // stripping "_" silently mangles every underscore-prefixed path
+        // (e.g. "_tools/x" -> "tools/x"). Fixed to strip the "/" escape only.
+        let path = pathSrc.startsWith("/") ? pathSrc.substring(1) : pathSrc;
         if (path.startsWith(this.config.baseDir)) {
             path = path.substring(this.config.baseDir.length);
         }
