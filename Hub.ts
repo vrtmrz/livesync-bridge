@@ -1,5 +1,5 @@
 import { Config, FileData } from "./types.ts";
-import { Peer } from "./Peer.ts";
+import { Peer, PeerHealth } from "./Peer.ts";
 import { PeerStorage } from "./PeerStorage.ts";
 import { PeerCouchDB } from "./PeerCouchDB.ts";
 
@@ -9,6 +9,16 @@ export class Hub {
     peers = [] as Peer[];
     constructor(conf: Config) {
         this.conf = conf;
+    }
+    // Aggregate peer health for the heartbeat. `ok` = every peer syncing (also
+    // false if no peers were constructed). `restartWorthy` = any peer judges itself
+    // restart-worthy (was healthy, now persistently failing while its backend is
+    // up) — see Peer.probeHealth.
+    async healthProbe(): Promise<{ ok: boolean; restartWorthy: boolean; peers: PeerHealth[] }> {
+        const peers = await Promise.all(this.peers.map((p) => p.probeHealth()));
+        const ok = peers.length > 0 && peers.every((p) => p.ok);
+        const restartWorthy = peers.some((p) => p.restartWorthy);
+        return { ok, restartWorthy, peers };
     }
     start() {
         for (const p of this.peers) {
@@ -27,7 +37,12 @@ export class Hub {
             }
         }
         for (const p of this.peers) {
-            p.start();
+            // Fire-and-forget by design (peers start concurrently), but never let a
+            // peer's start() reject unhandled — that is fatal in Deno. PeerCouchDB
+            // now supervises its own connect loop; this is belt-and-suspenders.
+            p.start().catch((e) => {
+                console.error(`[Hub] peer "${p.config.name}" start() failed:`, e);
+            });
         }
     }
 
