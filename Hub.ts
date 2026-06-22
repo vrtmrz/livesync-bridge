@@ -26,9 +26,18 @@ export class Hub {
                 throw new Error(`Unexpected Peer type: ${(peer as any)?.name} - ${(peer as any)?.type}`);
             }
         }
-        for (const p of this.peers) {
-            p.start();
-        }
+        // Initialize couchdb peers FIRST and await them, then start storage peers.
+        // Otherwise a storage peer's offline scan can push to a couchdb peer before its
+        // DB managers are initialized (initializeDatabase), causing
+        // "Cannot read properties of undefined (reading 'getDBEntryMeta')".
+        (async () => {
+            for (const p of this.peers) {
+                if (p.config.type === "couchdb") await p.start();
+            }
+            for (const p of this.peers) {
+                if (p.config.type !== "couchdb") p.start();
+            }
+        })();
     }
 
     async dispatch(source: Peer, path: string, data: FileData | false) {
