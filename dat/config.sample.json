@@ -11,7 +11,10 @@
             "passphrase": "passphrase",
             "obfuscatePassphrase": "passphrase",
             "baseDir": "blog/",
-            "useRemoteTweaks": true
+            "useRemoteTweaks": true,
+            "useShortPolling": false,
+            "pollIntervalMs": 5000,
+            "pollTimeoutMs": 50000
         },
         {
             "type": "couchdb",

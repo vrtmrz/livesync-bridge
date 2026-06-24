@@ -75,7 +75,10 @@ The configuration file consists of the following structure.
       "passphrase": "passphrase", // E2EE passphrase, if you do not enabled, leave it blank.
       "obfuscatePassphrase": "passphrase", // Path obfuscation passphrase, if you do not enabled, leave it blank. if enabled, set the same value of passphrase.
       "baseDir": "blog/", // Sharing folder
-      "useRemoteTweaks":true // Overwrite customChunkSize or minimumChunkSize, and check configuration matches
+      "useRemoteTweaks":true, // Overwrite customChunkSize or minimumChunkSize, and check configuration matches
+      "useShortPolling": false, // Use short-polling instead of live changes feed (enable for Cloudflare Tunnel / reverse proxies)
+      "pollIntervalMs": 5000, // Interval between poll requests in ms (default: 5000)
+      "pollTimeoutMs": 50000 // HTTP timeout per poll request in ms (default: 50000)
     },
     {
       "type": "couchdb",
@@ -108,6 +111,29 @@ The configuration file consists of the following structure.
   ]
 }
 ```
+
+## Cloudflare Tunnel / Reverse Proxy Support
+
+If your CouchDB is accessed through Cloudflare Tunnel, nginx, or another reverse proxy that terminates long-lived HTTP connections, the default live changes feed (`PouchDB.changes({ live: true })`) may silently stall. The proxy kills the idle connection, but PouchDB does not detect the disconnect and stops receiving updates.
+
+This is the same issue addressed by the "Use timeouts instead of heartbeats" setting in the Self-hosted LiveSync Obsidian plugin.
+
+To enable short-polling mode for the bridge, add these options to your CouchDB peer configuration:
+
+```jsonc
+{
+  "type": "couchdb",
+  "name": "my-vault",
+  // ... other settings ...
+  "useShortPolling": true,    // Enable short-polling (default: false)
+  "pollIntervalMs": 5000,     // Poll every 5 seconds (default: 5000)
+  "pollTimeoutMs": 50000      // HTTP timeout per request (default: 50000)
+}
+```
+
+When enabled, the bridge replaces the persistent `_changes` feed with periodic HTTP requests (`POST _changes?feed=normal`). Each request completes immediately with any pending changes, avoiding the proxy timeout issue entirely.
+
+**When to use:** Enable `useShortPolling` if your CouchDB is behind Cloudflare Tunnel, a reverse proxy, or any infrastructure that imposes idle connection timeouts. If you connect directly to CouchDB (e.g. `localhost:5984`), the default live mode works fine and you don't need this.
 
 ## Realistic example
 
