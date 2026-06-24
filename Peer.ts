@@ -20,12 +20,15 @@ export abstract class Peer {
     toLocalPath(path: string) {
         const relativeJoined = joinPosix(this.config.baseDir, path);
         const relative = relativeJoined == "." ? "" : relativeJoined;
-        const ret = (relative.startsWith("_")) ? ("/" + relative) : relative;
-        // this.debugLog(`**TOLOCAL: ${path} => ${ret}`);
-        return ret;
+        // NOTE: do NOT special-case leading "_" here. The commonlib path2id_base/id2path_base
+        // already handle "_"-prefixed paths correctly. Adding "/" here double-mangled them
+        // (e.g. _attachments -> attachments on round-trip).
+        // this.debugLog(`**TOLOCAL: ${path} => ${relative}`);
+        return relative;
     }
     toGlobalPath(pathSrc: string) {
-        let path = pathSrc.startsWith("_") ? pathSrc.substring(1) : pathSrc;
+        // NOTE: do NOT strip a leading "_" here (was corrupting _attachments -> attachments).
+        let path = pathSrc;
         if (path.startsWith(this.config.baseDir)) {
             path = path.substring(this.config.baseDir.length);
         }
