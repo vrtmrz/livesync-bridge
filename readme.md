@@ -75,6 +75,7 @@ The configuration file consists of the following structure.
       "passphrase": "passphrase", // E2EE passphrase, if you do not enabled, leave it blank.
       "obfuscatePassphrase": "passphrase", // Path obfuscation passphrase, if you do not enabled, leave it blank. if enabled, set the same value of passphrase.
       "baseDir": "blog/", // Sharing folder
+      "includeInternal": [".claude/**"], // Opt-in glob patterns for internal/hidden files (see caution below). Omit to keep the default of skipping them.
       "useRemoteTweaks":true // Overwrite customChunkSize or minimumChunkSize, and check configuration matches
     },
     {
@@ -108,6 +109,27 @@ The configuration file consists of the following structure.
   ]
 }
 ```
+
+## Synchronising internal/hidden files
+
+By default, the bridge skips all of Self-hosted LiveSync's internal documents — the ones stored with an `i:` prefix, such as files inside hidden folders like `.obsidian/`, `.claude/`, and other tool configuration directories. These are normally left out of the sync.
+
+The optional `includeInternal` field opts specific internal paths back in. It takes an array of [minimatch](https://github.com/isaacs/minimatch) glob patterns that are matched against the path **after** the `i:` prefix is stripped:
+
+```jsonc
+{
+  "type": "couchdb",
+  "name": "test1",
+  // ...
+  "baseDir": "blog/",
+  "includeInternal": [".claude/**"] // Sync everything under .claude/
+}
+```
+
+A document is included when its de-prefixed path matches any one of the patterns. Patterns are matched with the `dot` option, so leading-dot folders such as `.claude/` are matched as expected.
+
+> [!CAUTION]
+> This synchronises files that are normally hidden and internal. Such folders often hold tool configuration that can contain machine-specific paths, local settings, or secrets. Only include patterns you genuinely intend to share, and review what they match before enabling. The option is opt-in: leave it out to keep the default behaviour, where all internal/hidden files are skipped.
 
 ## Realistic example
 
