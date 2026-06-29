@@ -1,3 +1,4 @@
 [submodule "lib"]
 	path = lib
-	url = https://github.com/vrtmrz/livesync-commonlib
+	url = https://github.com/jagajaga/livesync-commonlib
+	branch = v3-rabin-karp-backport

@@ -12,9 +12,55 @@ import { dirname } from "@std/path";
 // crash-looped the bridge into systemd's start limit and left it down silently
 // for days. Log and keep running instead; the per-peer supervisor re-establishes
 // the actual sync.
+//
+// One rejection class needs special handling, though. Under burst load (bulk
+// imports, large folder renames, vault wipes via scanOfflineChanges) the
+// Node→Deno compat layer in pouchdb-adapter-http's node-fetch shim can emit
+// `TypeError: expected AsyncWrap` from the socket-create path. Swallowing it is
+// correct for the *transient* case — PouchDB retries the batch. But we observed
+// a *persistent* mode in production where it fires on every changes-feed retry,
+// turning the supervisor's reconnect loop into a tight spin that never makes
+// progress; only a fresh Deno process gets a clean node-fetch socket pool. So
+// we count AsyncWrap rejections in a sliding window and trip a circuit breaker:
+// if they fire often enough that the watch is clearly not recovering, exit and
+// let Docker's restart policy bring us up clean. The volume-persisted `since`
+// checkpoint in PeerCouchDB makes the restart resume mid-stream, not from "now".
+const ASYNC_WRAP_WINDOW_MS = 5 * 60 * 1000;
+const ASYNC_WRAP_EXIT_THRESHOLD = 30; // ~one per 10s for 5 min == permanently broken
+let asyncWrapCount = 0;
+let asyncWrapWindowStart = Date.now();
 globalThis.addEventListener("unhandledrejection", (event) => {
+    const reason = event.reason;
+    const message = reason instanceof Error ? reason.message : String(reason);
+    const isAsyncWrapBug = message.includes("expected AsyncWrap") ||
+        (reason instanceof Error &&
+            typeof reason.stack === "string" &&
+            reason.stack.includes("node-fetch"));
+    if (isAsyncWrapBug) {
+        const now = Date.now();
+        if (now - asyncWrapWindowStart > ASYNC_WRAP_WINDOW_MS) {
+            asyncWrapCount = 0;
+            asyncWrapWindowStart = now;
+        }
+        asyncWrapCount++;
+        if (asyncWrapCount >= ASYNC_WRAP_EXIT_THRESHOLD) {
+            console.error(
+                `[LSB] AsyncWrap threshold reached (${asyncWrapCount} rejections in ${
+                    Math.round((now - asyncWrapWindowStart) / 1000)
+                }s); exiting for Docker restart to get a fresh socket pool.`,
+            );
+            // Don't preventDefault — let the process die so Docker restarts us
+            // clean; PeerCouchDB resumes from the persisted `since` checkpoint.
+            Deno.exit(1);
+        }
+        console.error(
+            `[LSB] Swallowed node-fetch/AsyncWrap rejection (${asyncWrapCount}/${ASYNC_WRAP_EXIT_THRESHOLD} in window):`,
+            message,
+        );
+    } else {
+        console.error("[LSB] Unhandled rejection (kept alive):", reason);
+    }
     event.preventDefault();
-    console.error("[LSB] Unhandled rejection (kept alive):", event.reason);
 });
 
 const KEY = "LSB_"

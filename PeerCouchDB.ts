@@ -1,5 +1,5 @@
 import { DirectFileManipulator, FileInfo, MetaEntry, ReadyEntry } from "./lib/src/API/DirectFileManipulatorV2.ts";
-import { FilePathWithPrefix, LOG_LEVEL_NOTICE, MILESTONE_DOCID, TweakValues } from "./lib/src/common/types.ts";
+import { FilePathWithPrefix, IDPrefixes, LOG_LEVEL_NOTICE, MILESTONE_DOCID, TweakValues } from "./lib/src/common/types.ts";
 import { PeerCouchDBConf, FileData } from "./types.ts";
 import { decodeBinary } from "./lib/src/string_and_binary/convert.ts";
 import { isPlainText } from "./lib/src/string_and_binary/path.ts";
@@ -8,6 +8,7 @@ import { createBinaryBlob, createTextBlob, isDocContentSame, unique } from "./li
 import { minimatch } from "minimatch";
 import { PouchDB } from "./lib/src/pouchdb/pouchdb-http.ts";
 import { promiseWithResolver } from "octagonal-wheels/promises";
+import { dirname } from "@std/path";
 
 // export class PeerInstance()
 
@@ -17,8 +18,19 @@ export class PeerCouchDB extends Peer {
     private _started = promiseWithResolver<void>();
     private _connected = false;
     private _remoteEmpty = false;
+    // File-backed mirror of the two checkpoints that matter for resume-correctness:
+    // `since` (where to resume the changes feed) and `remote-created` (the DB
+    // generation marker gating the "fetch from the first again" reset). The
+    // upstream backing store is localStorage, which lives under /deno-dir/ in the
+    // container and does NOT survive Docker restarts; the compose file mounts
+    // /app/dat (where config.json lives) as a named volume but not /deno-dir. So
+    // without this shadow, every restart loses `since` and resumes from "now",
+    // silently dropping any changes that landed while the bridge was down.
+    private persistedState: { since?: string; "remote-created"?: string } = {};
+    private pendingStateWrite?: ReturnType<typeof setTimeout>;
     constructor(conf: PeerCouchDBConf, dispatcher: DispatchFun) {
         super(conf, dispatcher);
+        this.persistedState = this.readStateSync();
         // The manipulator is built lazily in start(), only after a probe confirms
         // CouchDB is reachable. Building it here would fire its one-shot init
         // against a possibly-down CouchDB (an unhandled rejection) and then be
@@ -44,10 +56,87 @@ export class PeerCouchDB extends Peer {
                 fetch: (url: string | Request, opts?: RequestInit) => globalThis.fetch(url, opts),
             }) as PouchDB.Database<T>;
         };
-        // Fetch remote since.
-        this.man.since = this.getSetting("since") || "now";
+        // Resolve `since`: volume-persisted file first (survives Docker restarts),
+        // then legacy localStorage, then "now". persistedState is kept current in
+        // memory as we watch, so a rebuild on reconnect picks up the latest seq.
+        this.man.since = this.persistedState.since ?? this.getSetting("since") ?? "now";
         if (prev) void prev.close().catch(() => {});
     }
+    private get stateFile(): string {
+        const configFile = Deno.env.get("LSB_CONFIG") || "./dat/config.json";
+        const safeName = this.config.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+        return `${dirname(configFile)}/state-${safeName}.json`;
+    }
+
+    private readStateSync(): { since?: string; "remote-created"?: string } {
+        try {
+            return JSON.parse(Deno.readTextFileSync(this.stateFile));
+        } catch (ex) {
+            if (!(ex instanceof Deno.errors.NotFound)) {
+                console.error(`[${this.config.name}] failed to read ${this.stateFile}:`, ex);
+            }
+            return {};
+        }
+    }
+
+    // Trailing-edge debounce so a burst of changes doesn't translate to a burst
+    // of writes to the volume-mounted state file. Last value within the window
+    // wins, which is what we want for a monotonically advancing checkpoint.
+    private persistStateDebounced(): void {
+        if (this.pendingStateWrite !== undefined) return;
+        this.pendingStateWrite = setTimeout(async () => {
+            this.pendingStateWrite = undefined;
+            const snapshot = JSON.stringify(this.persistedState);
+            try {
+                await Deno.writeTextFile(this.stateFile, snapshot);
+            } catch (ex) {
+                console.error(`[${this.config.name}] failed to write ${this.stateFile}:`, ex);
+            }
+        }, 500);
+    }
+
+    private persistState<K extends keyof typeof this.persistedState>(key: K, value: string): void {
+        this.persistedState[key] = value;
+        this.persistStateDebounced();
+    }
+
+    // Guard against writing a corrupted document to disk: recompute each chunk's
+    // hash from its decrypted piece and confirm it matches the child id the meta
+    // references. A mismatch means a chunk failed to decrypt/reassemble cleanly
+    // (e.g. a transient burst-load failure), so we drop the change and let the
+    // next change event re-deliver it rather than persisting garbage.
+    private async verifyChunkIntegrity(entry: ReadyEntry): Promise<boolean> {
+        const hashManager = this.man.liveSyncLocalDB?.managers?.hashManager;
+        if (!hashManager) return true;
+        const children = entry.children ?? [];
+        const data = entry.data ?? [];
+        // Inline notes (legacy) have empty children and a single concatenated
+        // body; nothing to verify against per-chunk.
+        if (children.length === 0) return true;
+        if (children.length !== data.length) {
+            this.normalLog(
+                ` Chunk integrity: children/data length mismatch (${children.length} vs ${data.length}) for ${entry.path}`,
+                LOG_LEVEL_NOTICE,
+            );
+            return false;
+        }
+        for (let i = 0; i < children.length; i++) {
+            const expected = children[i];
+            const piece = data[i];
+            if (typeof piece !== "string") continue;
+            const hash = await hashManager.computeHash(piece);
+            const actual = `${IDPrefixes.Chunk}${hash}`;
+            if (actual !== expected) {
+                this.normalLog(
+                    ` Chunk integrity: hash mismatch at index ${i} for ${entry.path}: expected ${expected}, computed ${actual}`,
+                    LOG_LEVEL_NOTICE,
+                );
+                return false;
+            }
+        }
+        return true;
+    }
+
     async delete(pathSrc: string): Promise<boolean> {
         await this._started.promise;
         const path = this.toLocalPath(pathSrc);
@@ -258,20 +347,30 @@ export class PeerCouchDB extends Peer {
             if (!w) {
                 this.normalLog(`Remote database looks like empty. fetch from the first.`);
                 this.setSetting("remote-created", "0");
+                this.persistState("remote-created", "0");
                 // Connected fine; there's just nothing to watch yet. Mark it so health
                 // counts this as syncing rather than a stuck "not watching" state.
                 this._remoteEmpty = true;
                 return;
             }
             const created = w.created;
-            if (this.getSetting("remote-created") !== `${created}`) {
+            const knownCreated = this.persistedState["remote-created"] ?? this.getSetting("remote-created");
+            if (knownCreated !== `${created}`) {
                 this.man.since = "";
                 this.normalLog(`Remote database looks like rebuilt. fetch from the first again.`);
                 this.setSetting("remote-created", `${created}`);
+                this.persistState("remote-created", `${created}`);
             } else {
                 this.normalLog(`Watch starting from ${this.man.since}`);
             }
             this.man.beginWatch(async (entry) => {
+                if (!entry.deleted && !entry._deleted && !(await this.verifyChunkIntegrity(entry))) {
+                    this.normalLog(
+                        ` Dropping change for ${entry.path} (_id=${entry._id.substring(0, 8)}): chunk integrity check failed. Will resume on next change.`,
+                        LOG_LEVEL_NOTICE,
+                    );
+                    return;
+                }
                 const d = entry.type == "plain" ? entry.data : new Uint8Array(decodeBinary(entry.data));
                 let path = entry.path.substring(baseDir.length);
                 if (path.startsWith("/")) {
@@ -290,6 +389,7 @@ export class PeerCouchDB extends Peer {
                 }
             }, (entry) => {
                 this.setSetting("since", this.man.since);
+                this.persistState("since", this.man.since);
                 if (entry.path.indexOf(":") !== -1) {
                     if (this.config.includeInternal && entry.path.startsWith("i:")) {
                         const stripped = entry.path.substring(2);
