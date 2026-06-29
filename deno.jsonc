@@ -27,7 +27,7 @@
         "pouchdb-mapreduce": "npm:pouchdb-mapreduce@^9.0.0",
         "transform-pouch": "npm:transform-pouch@^2.0.0",
         "chokidar": "npm:chokidar@^3.5.1",
-        "trystero": "https://github.com/vrtmrz/vrtmrz/trystero#9e892a93ec14eeb57ce806d272fbb7c3935256d8"
+        "trystero": "npm:trystero@^0.22.0"
     },
     "lint": {
         "rules": {

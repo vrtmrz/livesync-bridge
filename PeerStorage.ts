@@ -6,7 +6,7 @@ import { isPlainText } from "./lib/src/string_and_binary/path.ts";
 import { parse, format, relative, dirname, resolve } from "@std/path";
 import { format as posixFormat, parse as posixParse } from "@std/path/posix"
 import { scheduleOnceIfDuplicated } from "octagonal-wheels/concurrency/lock";
-import { DispatchFun, Peer } from "./Peer.ts";
+import { DispatchFun, Peer, PeerHealth } from "./Peer.ts";
 import chokidar from "chokidar";
 import { walk } from 'fs/walk';
 
@@ -327,5 +327,12 @@ export class PeerStorage extends Peer {
         this.watcherDeno?.close();
         this.watcherDeno = undefined;
         return await Promise.resolve();
+    }
+    override health(): PeerHealth {
+        const ok = !!(this.watcherDeno || this.watcher);
+        // No remote backend (backendUp always true). A storage peer still doing its
+        // initial offline scan is "starting", not yet healthy, so the base restart
+        // logic won't flag it — only a watcher that dies after being healthy counts.
+        return { name: this.config.name, type: "storage", ok, detail: ok ? "watching" : "starting", backendUp: true, restartWorthy: false };
     }
 }

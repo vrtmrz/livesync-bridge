@@ -9,6 +9,22 @@ import { computeHash } from "./util.ts";
 
 export type DispatchFun = (source: Peer, path: string, data: FileData | false) => Promise<void>;
 
+export interface PeerHealth {
+    name: string;
+    type: string;
+    ok: boolean;
+    detail?: string;
+    // Whether this peer's backend is reachable right now. Used to tell "not
+    // syncing because the backend is down" (wait, don't restart) apart from "not
+    // syncing while the backend is up" (the bridge is at fault, restart can help).
+    // Peers with no remote backend (e.g. storage) report true.
+    backendUp: boolean;
+    // The bridge is at fault and a restart could plausibly help: the peer was
+    // healthy at some point, has since stayed unhealthy past a grace window, and
+    // its backend is reachable. Decided by probeHealth(), not the sync snapshot.
+    restartWorthy: boolean;
+}
+
 export abstract class Peer {
     config: PeerConf;
     // hub: Hub;
@@ -16,6 +32,42 @@ export abstract class Peer {
     constructor(conf: PeerConf, dispatcher: DispatchFun) {
         this.config = conf;
         this.dispatchToHub = dispatcher;
+    }
+    // How long a once-healthy peer must stay unhealthy (with its backend reachable)
+    // before a restart is worthwhile — long enough to ride out the self-healing
+    // watch reconnect and other brief dips, so they don't trigger a kill.
+    private static readonly RESTART_GRACE_MS = 60_000;
+    private _everOk = false;
+    private _notOkSince: number | undefined;
+    // Quick, non-blocking health snapshot. restartWorthy here is always false; the
+    // real (time- and backend-aware) verdict is decided by probeHealth().
+    health(): PeerHealth {
+        return { name: this.config.name, type: this.config.type, ok: true, backendUp: true, restartWorthy: false };
+    }
+    // Backend reachability check, possibly I/O-bound. Default: no remote backend, so
+    // always "up". PeerCouchDB overrides it to probe CouchDB.
+    checkBackendUp(): Promise<boolean> {
+        return Promise.resolve(true);
+    }
+    // Health with the backend-aware restart verdict. A peer is restart-worthy only
+    // once it has been healthy AND then stayed unhealthy past the grace window with
+    // its backend reachable. So a peer still doing its initial scan/connect (never
+    // healthy yet) and a peer that's idle only because its backend is down are
+    // never restart-worthy — neither is the bridge's fault, and restarting either
+    // would just churn. The backend probe is skipped until a peer has been healthy,
+    // so startup does no extra I/O.
+    async probeHealth(): Promise<PeerHealth> {
+        const base = this.health();
+        if (base.ok) {
+            this._everOk = true;
+            this._notOkSince = undefined;
+            return base;
+        }
+        if (!this._everOk) return base; // still starting up — not the bridge's fault
+        if (this._notOkSince === undefined) this._notOkSince = Date.now();
+        const backendUp = await this.checkBackendUp();
+        const restartWorthy = backendUp && (Date.now() - this._notOkSince > Peer.RESTART_GRACE_MS);
+        return { ...base, backendUp, restartWorthy };
     }
     toLocalPath(path: string) {
         const relativeJoined = joinPosix(this.config.baseDir, path);
