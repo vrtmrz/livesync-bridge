@@ -11,6 +11,7 @@
             "passphrase": "passphrase",
             "obfuscatePassphrase": "passphrase",
             "baseDir": "blog/",
+            "includeInternal": [".claude/**"],
             "useRemoteTweaks": true
         },
         {
