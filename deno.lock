@@ -545,6 +545,7 @@
       "npm:pouchdb-replication@9",
       "npm:pouchdb-utils@9",
       "npm:transform-pouch@2",
+      "npm:trystero@0.22",
       "npm:xxhash-wasm@^1.0.2"
     ]
   }
