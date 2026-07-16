@@ -54,6 +54,25 @@ git clone https://github.com/vrtmrz/livesync-bridge
 docker compose up -d
 ```
 
+### Container user and bind-mount permissions
+
+The image runs as a non-root user with UID and GID `1000` by default. This makes
+host bind mounts owned by the common first host user writable without granting
+world-write access.
+
+If your host uses different IDs, set them at build time:
+
+```bash
+docker build \
+  --build-arg APP_UID="$(id -u)" \
+  --build-arg APP_GID="$(id -g)" \
+  -t livesync-bridge .
+```
+
+Whichever IDs you use must have read/write access to the mounted `data` and
+`dat` paths. Existing volumes keep their current ownership and may need a
+one-time ownership adjustment when changing IDs.
+
 
 # Configuration
 
