@@ -69,6 +69,22 @@ docker build \
   -t livesync-bridge .
 ```
 
+For a bind-mounted vault that contains root-owned files and must be updated by
+the bridge, explicitly opt into root mode by setting **both** build arguments
+to `0`:
+
+```bash
+docker build \
+  --build-arg APP_UID=0 \
+  --build-arg APP_GID=0 \
+  -t livesync-bridge .
+```
+
+Root mode is intentionally opt-in. It gives the bridge full write access to the
+mounted paths, so use it only for a trusted, dedicated vault mount. Mixed root
+and non-root IDs (for example, `APP_UID=0` with `APP_GID=1000`) are rejected at
+build time.
+
 Whichever IDs you use must have read/write access to the mounted `data` and
 `dat` paths. Existing volumes keep their current ownership and may need a
 one-time ownership adjustment when changing IDs.
