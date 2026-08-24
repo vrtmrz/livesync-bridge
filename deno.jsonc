@@ -8,11 +8,11 @@
         "test:integration": "deno test -A test/integration/PeerCouchDB.integration.ts"
     },
     "imports": {
-        "@vrtmrz/livesync-commonlib": "npm:@vrtmrz/livesync-commonlib@0.1.17",
-        "@vrtmrz/livesync-commonlib/compat/common/types": "npm:@vrtmrz/livesync-commonlib@0.1.17/compat/common/types",
-        "@vrtmrz/livesync-commonlib/compat/common/utils": "npm:@vrtmrz/livesync-commonlib@0.1.17/compat/common/utils",
-        "@vrtmrz/livesync-commonlib/compat/string_and_binary/convert": "npm:@vrtmrz/livesync-commonlib@0.1.17/compat/string_and_binary/convert",
-        "@vrtmrz/livesync-commonlib/compat/string_and_binary/path": "npm:@vrtmrz/livesync-commonlib@0.1.17/compat/string_and_binary/path",
+        "@vrtmrz/livesync-commonlib": "npm:@vrtmrz/livesync-commonlib@0.1.19",
+        "@vrtmrz/livesync-commonlib/compat/common/types": "npm:@vrtmrz/livesync-commonlib@0.1.19/compat/common/types",
+        "@vrtmrz/livesync-commonlib/compat/common/utils": "npm:@vrtmrz/livesync-commonlib@0.1.19/compat/common/utils",
+        "@vrtmrz/livesync-commonlib/compat/string_and_binary/convert": "npm:@vrtmrz/livesync-commonlib@0.1.19/compat/string_and_binary/convert",
+        "@vrtmrz/livesync-commonlib/compat/string_and_binary/path": "npm:@vrtmrz/livesync-commonlib@0.1.19/compat/string_and_binary/path",
         "@std/cli": "jsr:@std/cli@^1.0.17",
         "fs/walk": "jsr:@std/fs@^1.0.17/",
         "@std/path": "jsr:@std/path@^1.0.9",
