@@ -54,6 +54,68 @@ git clone https://github.com/vrtmrz/livesync-bridge
 docker compose up -d
 ```
 
+The Compose configuration stores Deno's `localStorage` data, which offline
+scans use to identify changed files, in the named volume
+`bridge_local_storage`. Keep this volume when recreating containers. Running
+`docker compose down --volumes` removes it, so the next offline scan must
+rebuild this data.
+
+### Choosing where scan state is stored
+
+The named volume is the default because it preserves the scan state across
+container recreation without requiring a host path. You can replace it with a
+bind mount if you prefer to manage this data on the host. Create a
+`docker-compose.local.yml` file containing:
+
+```yaml
+services:
+  bridge:
+    volumes:
+      - type: bind
+        source: ./dat/location_data
+        target: /deno-dir/location_data
+        bind:
+          create_host_path: false
+```
+
+Create the source directory before starting the bridge:
+
+```bash
+mkdir -p dat/location_data
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+```
+
+On Linux, ensure that the directory is writable by UID and GID `1993:1993`,
+which the current image uses for the `deno` user. Files below `dat/` are
+already excluded from this repository by `.gitignore`.
+
+For host-managed temporary storage, use a path below `/tmp` instead, for
+example:
+
+```yaml
+source: /tmp/livesync-bridge-location_data
+```
+
+Create this directory and give the `deno` user write access before starting
+the bridge. Its lifetime depends on the host's `/tmp` clean-up policy; it can
+remain after the container is removed.
+
+For state which should last only as long as the container, replace the bind
+mount above with a memory-backed `tmpfs` mount:
+
+```yaml
+services:
+  bridge:
+    volumes:
+      - type: tmpfs
+        target: /deno-dir/location_data
+        tmpfs:
+          mode: 0o1777
+```
+
+The contents of this mount are lost when the container stops or is recreated,
+so the next offline scan must rebuild the state.
+
 
 # Configuration
 

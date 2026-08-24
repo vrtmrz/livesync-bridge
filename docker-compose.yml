@@ -7,4 +7,8 @@ services:
     volumes:
       - ./data:/app/data
       - ./dat:/app/dat
+      - bridge_local_storage:/deno-dir/location_data
     restart: unless-stopped
+
+volumes:
+  bridge_local_storage:
