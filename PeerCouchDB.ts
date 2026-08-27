@@ -1,5 +1,6 @@
 import { DirectFileManipulator } from "@vrtmrz/livesync-commonlib";
 import {
+    DOCID_SYNC_PARAMETERS,
     type FilePathWithPrefix,
     MILESTONE_DOCID,
     type TweakValues,
@@ -267,6 +268,41 @@ export class PeerCouchDB extends Peer {
                 // counts this as syncing rather than a stuck "not watching" state.
                 this._remoteEmpty = true;
                 return;
+            }
+            // Past this point the remote is an established vault, not a new one.
+            //
+            // A passphrase is only half of the key. The other half is the PBKDF2
+            // salt, which lives in `_local/obsidian_livesync_sync_parameters` on
+            // the remote. When that document is missing, commonlib does not fail:
+            // `createSyncParamsHanderForServer`'s `create` callback mints a FRESH
+            // salt and carries on. Every chunk then decrypts to garbage, and each
+            // one is reported as `Corrupted document: <path>`.
+            //
+            // Three things make that the worst possible diagnostic:
+            //
+            //  - it names the user's note, so it reads as data corruption when the
+            //    database is perfectly intact;
+            //  - it is byte-for-byte identical to what a WRONG PASSPHRASE produces
+            //    (measured: same file count, same failure count, same stack), so no
+            //    amount of staring at the log can tell the two apart;
+            //  - `_local/` documents are not copied by CouchDB replication, so
+            //    anyone who tests against a `_replicate`d copy of their database
+            //    lands here immediately — through no fault of their own.
+            //
+            // Refuse to start instead. A salt that cannot be right is not a
+            // degraded mode worth continuing in.
+            if (this.config.passphrase) {
+                const syncParams = await this.man.rawGet<Record<string, any>>(DOCID_SYNC_PARAMETERS);
+                if (!syncParams) {
+                    throw new Error(
+                        `Remote database is established but has no ${DOCID_SYNC_PARAMETERS}, ` +
+                        `while a passphrase is configured. That document holds the PBKDF2 salt; ` +
+                        `without it a fresh salt would be generated and EVERY document would fail ` +
+                        `to decrypt, reported as "Corrupted document". Note that CouchDB replication ` +
+                        `does not copy _local/ documents, so a replicated copy of a vault must have ` +
+                        `this one copied across by hand.`
+                    );
+                }
             }
             const created = w.created;
             if (this.getSetting("remote-created") !== `${created}`) {
