@@ -166,6 +166,7 @@ The configuration file consists of the following structure.
         // $filename and $mode have been set also in environment variables.
       },
       "scanOfflineChanges": true,
+      "ignore": ["**/.git/**", "node_modules/**"], // Glob patterns which are never synchronised. Omit to synchronise everything.
       "useChokidar":false, // We are using `Deno.watch` now, if you have trouble in Linux, please enable this.
     }
   ]
@@ -192,6 +193,36 @@ A document is included when its de-prefixed path matches any one of the patterns
 
 > [!CAUTION]
 > This synchronises files that are normally hidden and internal. Such folders often hold tool configuration that can contain machine-specific paths, local settings, or secrets. Only include patterns you genuinely intend to share, and review what they match before enabling. The option is opt-in: leave it out to keep the default behaviour, where all internal/hidden files are skipped.
+
+## Excluding paths from a storage peer
+
+By default a storage peer synchronises every file below its `baseDir`. The
+optional `ignore` field on a storage peer excludes paths from that. It takes an
+array of [minimatch](https://github.com/isaacs/minimatch) glob patterns which
+are matched against the path relative to `baseDir`:
+
+```jsonc
+{
+  "type": "storage",
+  "name": "storage-test1",
+  "baseDir": "./vault/",
+  "ignore": ["**/.git/**", "node_modules/**", "**/*.tmp"]
+}
+```
+
+A path is excluded when it matches any one of the patterns. Patterns are matched
+with the `dot` option, so leading-dot folders such as `.git/` are matched as
+expected. A pattern ending in `/**` also covers the directory itself, so
+`**/.git/**` excludes `.git` as well as everything inside it.
+
+Excluded directories are pruned while scanning: they are not descended into, and
+nothing inside them is inspected or read. This matters for `scanOfflineChanges`,
+because a repository such as `.git/` can hold tens of thousands of files which
+would otherwise all be examined at every start. Excluded paths are also skipped
+for live additions, changes and deletions.
+
+Note that `ignore` only stops a storage peer from *sending* its own files. A
+file which another peer sends is still written, even at an excluded path.
 
 ## Realistic example
 
