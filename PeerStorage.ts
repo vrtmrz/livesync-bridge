@@ -47,9 +47,22 @@ export class PeerStorage extends Peer {
     }
 
     // Whether a peer-relative POSIX path is excluded from synchronisation.
+    // A path is also excluded when any of its ancestor directories is: the scans
+    // prune an ignored directory, so live events for its descendants have to be
+    // dropped as well, even when a pattern such as `private` or `*.tmp` only
+    // matches the directory itself.
     isIgnored(path: string): boolean {
         if (!path) return false;
-        return this.getIgnorePatterns().some((pattern) => minimatch(path, pattern, IGNORE_MATCH_OPTIONS));
+        const patterns = this.getIgnorePatterns();
+        if (patterns.length === 0) return false;
+        const segments = path.split("/");
+        for (let depth = 1; depth <= segments.length; depth++) {
+            const candidate = segments.slice(0, depth).join("/");
+            if (patterns.some((pattern) => minimatch(candidate, pattern, IGNORE_MATCH_OPTIONS))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Peer-relative POSIX path of an absolute path as the watchers report it.
