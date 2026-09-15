@@ -1,12 +1,12 @@
 import { PeerStorageConf, FileData } from "./types.ts";
 import { delay, getDocData } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import { isPlainText } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/path";
-import { parse, format, relative, dirname, resolve } from "@std/path";
+import { parse, format, relative, dirname, resolve, join } from "@std/path";
 import { format as posixFormat, parse as posixParse } from "@std/path/posix";
 import { scheduleOnceIfDuplicated } from "octagonal-wheels/concurrency/lock";
 import { DispatchFun, Peer, PeerHealth } from "./Peer.ts";
 import chokidar from "chokidar";
-import { walk } from "fs/walk";
+import { minimatch } from "minimatch";
 
 import { scheduleTask } from "octagonal-wheels/concurrency/task";
 import {
@@ -16,12 +16,58 @@ import {
     LOG_LEVEL_VERBOSE,
 } from "octagonal-wheels/common/logger";
 
+// Ignore patterns are matched with minimatch, the same matcher the CouchDB peer uses
+// for `includeInternal`. `dot` is needed because the directories which are worth
+// ignoring at all are usually dot-directories, such as `.git`.
+const IGNORE_MATCH_OPTIONS = { dot: true } as const;
+
 export class PeerStorage extends Peer {
     declare config: PeerStorageConf;
 
 
     constructor(conf: PeerStorageConf, dispatcher: DispatchFun) {
         super(conf, dispatcher);
+    }
+
+    private ignorePatterns?: string[];
+
+    // The configured patterns, plus the bare directory form of every `dir/**` pattern.
+    // `**/.git/**` matches everything inside `.git` but not `.git` itself, and the
+    // directory itself is exactly what has to be recognised to stay out of the tree.
+    // As a consequence a trailing `/**` also covers the entry with that name.
+    private getIgnorePatterns(): string[] {
+        if (!this.ignorePatterns) {
+            const configured = this.config.ignore ?? [];
+            const directories = configured
+                .filter((pattern) => pattern.endsWith("/**"))
+                .map((pattern) => pattern.slice(0, -"/**".length));
+            this.ignorePatterns = [...configured, ...directories];
+        }
+        return this.ignorePatterns;
+    }
+
+    // Whether a peer-relative POSIX path is excluded from synchronisation.
+    // A path is also excluded when any of its ancestor directories is: the scans
+    // prune an ignored directory, so live events for its descendants have to be
+    // dropped as well, even when a pattern such as `private` or `*.tmp` only
+    // matches the directory itself.
+    isIgnored(path: string): boolean {
+        if (!path) return false;
+        const patterns = this.getIgnorePatterns();
+        if (patterns.length === 0) return false;
+        const segments = path.split("/");
+        for (let depth = 1; depth <= segments.length; depth++) {
+            const candidate = segments.slice(0, depth).join("/");
+            if (patterns.some((pattern) => minimatch(candidate, pattern, IGNORE_MATCH_OPTIONS))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Peer-relative POSIX path of an absolute path as the watchers report it.
+    toRelativePath(pathSrc: string) {
+        return this.toPosixPath(relative(this.toStoragePath(this.toLocalPath(".")), pathSrc));
     }
 
     async delete(pathSrc: string): Promise<boolean> {
@@ -171,6 +217,11 @@ export class PeerStorage extends Peer {
         const lP = this.toStoragePath(this.toLocalPath("."));
         const path = this.toPosixPath(relative(lP, pathSrc));
 
+        if (this.isIgnored(path)) {
+            this.debugLog(`${path} ignored`);
+            return;
+        }
+
         const data = await this.get(path);
 
         if (data === false) return;
@@ -191,6 +242,10 @@ export class PeerStorage extends Peer {
     async dispatchDeleted(pathSrc: string) {
         const lP = this.toStoragePath(this.toLocalPath("."));
         const path = this.toPosixPath(relative(lP, pathSrc));
+        if (this.isIgnored(path)) {
+            this.debugLog(`${path} ignored`);
+            return;
+        }
         await scheduleOnceIfDuplicated(pathSrc, async () => {
             await delay(250);
             if (!await this.isRepeating(path, false)) {
@@ -246,6 +301,13 @@ export class PeerStorage extends Peer {
 
     processFile(event: Deno.FsEvent) {
         for (const path of event.paths) {
+            // Filtered before the task is scheduled: the task stats the path, and an
+            // ignored path should not be stat()ed at all.
+            const relativePath = this.toRelativePath(path);
+            if (this.isIgnored(relativePath)) {
+                this.debugLog(`${relativePath} ignored`);
+                continue;
+            }
             const key = `${event.kind}-${path}`;
             // const key = path;
             scheduleTask(key, 100, async () => {
@@ -263,6 +325,26 @@ export class PeerStorage extends Peer {
 
 
 
+    // Yields the files below `root` which are not ignored, without ever entering an
+    // ignored directory. The pruning has to happen here rather than at dispatch time:
+    // stat(), isChanged() and the file reads which follow are what makes scanning a
+    // large ignored tree such as `.git` slow, so such a tree is never descended into.
+    private async *walkFiles(root: string, prefix = ""): AsyncGenerator<{ path: string, relativePath: string }> {
+        for await (const entry of Deno.readDir(root)) {
+            const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+            const path = join(root, entry.name);
+            if (this.isIgnored(relativePath)) {
+                this.debugLog(`${relativePath} ignored`);
+                continue;
+            }
+            if (entry.isDirectory) {
+                yield* this.walkFiles(path, relativePath);
+            } else if (entry.isFile) {
+                yield { path, relativePath };
+            }
+        }
+    }
+
     async startDenoFsWatch(): Promise<void> {
         if (this.watcherDeno) {
             const watcher = this.watcherDeno;
@@ -277,13 +359,10 @@ export class PeerStorage extends Peer {
         const lP = this.toStoragePath(this.toLocalPath("."));
         this.normalLog(`Scan offline changes: ${this.config.scanOfflineChanges ? "Enabled, now starting..." : "Disabled"}`);
         if (this.config.scanOfflineChanges) {
-            for await (const entry of walk(lP)) {
-                if (entry.isFile) {
-                    const ePath = this.toPosixPath(relative(this.toLocalPath("."), entry.path));
-                    if (await this.isChanged(ePath)) {
-                        this.debugLog(`Offline changes detected: ${ePath}`);
-                        await this.dispatch(entry.path);
-                    }
+            for await (const entry of this.walkFiles(lP)) {
+                if (await this.isChanged(entry.relativePath)) {
+                    this.debugLog(`Offline changes detected: ${entry.relativePath}`);
+                    await this.dispatch(entry.path);
                 }
             }
         }
@@ -327,6 +406,10 @@ export class PeerStorage extends Peer {
         const watcher = chokidar.watch(lP,
             {
                 ignoreInitial: !this.config.scanOfflineChanges,
+                // Prunes ignored directories from the watch itself, so their contents
+                // are never stat()ed or watched. dispatch() filters as well, for the
+                // events which chokidar reports before this can apply.
+                ignored: (path: string) => this.isIgnored(this.toRelativePath(path)),
                 awaitWriteFinish: {
                     stabilityThreshold: 500,
                 },
@@ -341,6 +424,10 @@ export class PeerStorage extends Peer {
         });
         watcher.on("change", async (path) => {
             const ePath = this.toPosixPath(relative(this.toLocalPath("."), path));
+            if (this.isIgnored(ePath)) {
+                this.debugLog(`${ePath} ignored`);
+                return;
+            }
             if (!await this.isChanged(ePath)) {
                 // this.debugLog(`Not changed: ${ePath}`);
             } else {
@@ -350,6 +437,10 @@ export class PeerStorage extends Peer {
         })
         watcher.on("add", async (path) => {
             const ePath = this.toPosixPath(relative(this.toLocalPath("."), path));
+            if (this.isIgnored(ePath)) {
+                this.debugLog(`${ePath} ignored`);
+                return;
+            }
             if (!await this.isChanged(ePath)) {
                 // this.debugLog(`Not changed: ${ePath}`);
             } else {
@@ -359,6 +450,10 @@ export class PeerStorage extends Peer {
         })
         watcher.on("unlink", async (path) => {
             const ePath = this.toPosixPath(relative(this.toLocalPath("."), path));
+            if (this.isIgnored(ePath)) {
+                this.debugLog(`${ePath} ignored`);
+                return;
+            }
             this.debugLog(`Unlink detected: ${ePath}`);
             await this.dispatchDeleted(path)
         })

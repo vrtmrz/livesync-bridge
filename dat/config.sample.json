@@ -49,6 +49,7 @@
                 "args": ["$filename", "$mode"]
             },
             "scanOfflineChanges": true,
+            "ignore": ["**/.git/**", "node_modules/**"],
             "useChokidar": true
         }
     ]
