@@ -210,10 +210,13 @@ are matched against the path relative to `baseDir`:
 }
 ```
 
-A path is excluded when it matches any one of the patterns. Patterns are matched
-with the `dot` option, so leading-dot folders such as `.git/` are matched as
-expected. A pattern ending in `/**` also covers the directory itself, so
-`**/.git/**` excludes `.git` as well as everything inside it.
+A path is excluded when it, or any directory containing it, matches any one of
+the patterns. Patterns are matched with the `dot` option, so leading-dot folders
+such as `.git/` are matched as expected. A pattern ending in `/**` also covers
+the directory itself, so `**/.git/**` excludes `.git` as well as everything
+inside it. Likewise, a pattern which matches a directory's name excludes
+everything below that directory: `private` excludes `private/note.md`, and
+`**/*.tmp` excludes the contents of a directory named `cache.tmp`.
 
 Excluded directories are pruned while scanning: they are not descended into, and
 nothing inside them is inspected or read. This matters for `scanOfflineChanges`,
@@ -221,8 +224,10 @@ because a repository such as `.git/` can hold tens of thousands of files which
 would otherwise all be examined at every start. Excluded paths are also skipped
 for live additions, changes and deletions.
 
-Note that `ignore` only stops a storage peer from *sending* its own files. A
-file which another peer sends is still written, even at an excluded path.
+Note that `ignore` only stops a storage peer from *sending* its own changes.
+Incoming changes from other peers are still accepted: a file which another peer
+sends is still written, and a deletion which another peer sends is still
+applied, even at an excluded path.
 
 ## Realistic example
 
