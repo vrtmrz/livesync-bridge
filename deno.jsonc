@@ -14,7 +14,6 @@
         "@vrtmrz/livesync-commonlib/compat/string_and_binary/convert": "npm:@vrtmrz/livesync-commonlib@0.1.19/compat/string_and_binary/convert",
         "@vrtmrz/livesync-commonlib/compat/string_and_binary/path": "npm:@vrtmrz/livesync-commonlib@0.1.19/compat/string_and_binary/path",
         "@std/cli": "jsr:@std/cli@^1.0.17",
-        "fs/walk": "jsr:@std/fs@^1.0.17/",
         "@std/path": "jsr:@std/path@^1.0.9",
         "@types/pouchdb": "npm:@types/pouchdb@^6.4.2",
         "octagonal-wheels": "npm:octagonal-wheels@^0.1.53",
