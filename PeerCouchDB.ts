@@ -17,6 +17,7 @@ import {
 import { minimatch } from "minimatch";
 import { promiseWithResolver } from "octagonal-wheels/promises";
 import { LOG_LEVEL_NOTICE } from "octagonal-wheels/common/logger";
+import { withRetry } from "./util.ts";
 
 type ManipulatorMetaEntry = Parameters<DirectFileManipulator["getByMeta"]>[0];
 type ManipulatorReadyEntry = Awaited<ReturnType<DirectFileManipulator["getByMeta"]>>;
@@ -60,13 +61,27 @@ export class PeerCouchDB extends Peer {
         if (await this.isRepeating(pathSrc, false)) {
             return false;
         }
-        const r = await this.man.delete(path);
-        if (r) {
-            this.receiveLog(` ${path} deleted`);
-        } else {
-            this.receiveLog(` ${path} delete failed`, LOG_LEVEL_NOTICE);
+        try {
+            // Retry only the network call. The isRepeating() dedup guard above must NOT
+            // be re-run on retry, or the retry would be swallowed as a duplicate.
+            const r = await withRetry(() => this.man.delete(path), {
+                label: `delete ${path}`,
+                attempts: 10,
+                onRetry: (m) => this.normalLog(m, LOG_LEVEL_NOTICE),
+            });
+            if (r) {
+                this.receiveLog(` ${path} deleted`);
+            } else {
+                this.receiveLog(` ${path} delete failed`, LOG_LEVEL_NOTICE);
+            }
+            return r;
+        } catch (ex) {
+            // Exhausted retries: never throw (that would kill the daemon). Clear the
+            // dedup cache so a later re-dispatch / offline scan re-attempts this path.
+            this.cache.set(pathSrc, "");
+            this.receiveLog(` ${path} DELETE gave up after retries: ${(ex as Error)?.message ?? ex}`, LOG_LEVEL_NOTICE);
+            return false;
         }
-        return r;
     }
     async put(pathSrc: string, data: FileData): Promise<boolean> {
         await this._started.promise;
@@ -81,25 +96,42 @@ export class PeerCouchDB extends Peer {
             size: data.size
         };
         const saveData = (data.data instanceof Uint8Array) ? createBinaryBlob(data.data) : createTextBlob(data.data);
-        const old = await this.man.get(path as FilePathWithPrefix, true) as false | ManipulatorMetaEntry;
-        // const old = await this.getMeta(path as FilePathWithPrefix);
-        if (old && Math.abs(this.compareDate(info, old)) < 3600) {
-            const oldDoc = await this.man.getByMeta(old);
-            if (oldDoc && ("data" in oldDoc)) {
-                const d = oldDoc.type == "plain" ? createTextBlob(oldDoc.data) : createBinaryBlob(new Uint8Array(decodeBinary(oldDoc.data)));
-                if (await isDocContentSame(d, saveData)) {
-                    this.normalLog(` Skipped (Same) ${path} `);
-                    return false;
+        try {
+            // Retry only the network block (get old -> compare -> put). The isRepeating()
+            // dedup guard above must NOT be re-run on retry, or the retry would be
+            // swallowed as a duplicate and the change silently lost.
+            return await withRetry(async () => {
+                const old = await this.man.get(path as FilePathWithPrefix, true) as false | ManipulatorMetaEntry;
+                // const old = await this.getMeta(path as FilePathWithPrefix);
+                if (old && Math.abs(this.compareDate(info, old)) < 3600) {
+                    const oldDoc = await this.man.getByMeta(old);
+                    if (oldDoc && ("data" in oldDoc)) {
+                        const d = oldDoc.type == "plain" ? createTextBlob(oldDoc.data) : createBinaryBlob(new Uint8Array(decodeBinary(oldDoc.data)));
+                        if (await isDocContentSame(d, saveData)) {
+                            this.normalLog(` Skipped (Same) ${path} `);
+                            return false;
+                        }
+                    }
                 }
-            }
+                const r = await this.man.put(path, saveData, info, type);
+                if (r) {
+                    this.receiveLog(` ${path} saved`);
+                } else {
+                    this.receiveLog(` ${path} ignored`);
+                }
+                return r;
+            }, {
+                label: `put ${path}`,
+                attempts: 10,
+                onRetry: (m) => this.normalLog(m, LOG_LEVEL_NOTICE),
+            });
+        } catch (ex) {
+            // Exhausted retries: never throw (that would kill the daemon). Clear the
+            // dedup cache so a later re-dispatch / offline scan re-attempts this path.
+            this.cache.set(pathSrc, "");
+            this.receiveLog(` ${path} PUT gave up after retries: ${(ex as Error)?.message ?? ex}`, LOG_LEVEL_NOTICE);
+            return false;
         }
-        const r = await this.man.put(path, saveData, info, type);
-        if (r) {
-            this.receiveLog(` ${path} saved`);
-        } else {
-            this.receiveLog(` ${path} ignored`);
-        }
-        return r;
     }
     async get(pathSrc: FilePathWithPrefix): Promise<false | FileData> {
         await this._started.promise;
