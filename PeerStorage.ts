@@ -56,14 +56,42 @@ export class PeerStorage extends Peer {
                 // While recursive is true, mkdir will not raise the `AlreadyExist`.
                 console.log(ex);
             }
-            const fp = await Deno.open(path, { read: true, write: true, create: true });
-            if (data.data instanceof Uint8Array) {
-                const writtensize = await fp.write(data.data);
-                await fp.truncate(writtensize);
-            } else {
-                const writtensize = await fp.write(new TextEncoder().encode(getDocData(data.data)));
-                await fp.truncate(writtensize);
+            // Refuse to truncate an existing file to zero length.
+            //
+            // We have observed the remote read occasionally yielding an empty
+            // payload while the document itself is intact: other peers sharing
+            // the same database receive the same change and write the correct
+            // content. Because put() wrote whatever it was handed and then
+            // truncated to the written length, a single bad read silently
+            // emptied a live file on disk.
+            //
+            // The file count stays the same and nothing is logged, so the loss
+            // is invisible until someone opens the note. If the empty copy then
+            // propagates to the remaining peers, the content is gone for good.
+            //
+            // An empty write over existing content is never something the user
+            // asked for, so treat it as a failed read rather than as data.
+            const incoming = data.data instanceof Uint8Array
+                ? data.data
+                : new TextEncoder().encode(getDocData(data.data));
+            if (incoming.byteLength === 0) {
+                let existingSize = -1;
+                try {
+                    existingSize = (await Deno.stat(path)).size;
+                } catch (_e) {
+                    existingSize = -1;
+                }
+                if (existingSize > 0) {
+                    this.normalLog(
+                        `Empty write blocked: ${lp} (${existingSize} bytes on disk, 0 bytes received)`,
+                        LOG_LEVEL_NOTICE,
+                    );
+                    return false;
+                }
             }
+            const fp = await Deno.open(path, { read: true, write: true, create: true });
+            const writtensize = await fp.write(incoming);
+            await fp.truncate(writtensize);
             await fp.utime(new Date(data.mtime), new Date(data.mtime));
             fp.close();
             this.receiveLog(`${lp} saved`);
