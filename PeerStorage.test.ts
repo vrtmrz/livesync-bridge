@@ -1,6 +1,6 @@
 import chokidar from "chokidar";
 import { PeerStorage } from "./PeerStorage.ts";
-import type { PeerStorageConf } from "./types.ts";
+import type { FileData, PeerStorageConf } from "./types.ts";
 
 function assertEquals<T>(actual: T, expected: T, message: string) {
     if (actual !== expected) {
@@ -161,6 +161,14 @@ class ControlledChokidarWatcher {
         }
     }
 
+    async emitAsync(event: string, ...args: unknown[]) {
+        const handlers = this.handlers.get(event) ?? [];
+        assert(handlers.length > 0, `${event} handler should be registered`);
+        for (const handler of handlers) {
+            await handler(...args);
+        }
+    }
+
     close() {
         this.closeCalls += 1;
         return this.closePromise;
@@ -211,3 +219,82 @@ Deno.test("PeerStorage Chokidar error clears health and stop waits for close", a
         await Deno.remove(tempDir, { recursive: true });
     }
 });
+
+type ChokidarUnlinkFixture = {
+    path: string;
+    watcher: ControlledChokidarWatcher;
+    dispatched: { path: string; data: FileData | false }[];
+    messages: string[];
+};
+
+async function withChokidarUnlinkFixture(check: (fixture: ChokidarUnlinkFixture) => Promise<void>) {
+    const originalWatch = chokidar.watch;
+    const originalStat = Deno.stat;
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-unlink-test-" });
+    const path = `${tempDir}/note.md`;
+    const watcher = new ControlledChokidarWatcher();
+    const dispatched: ChokidarUnlinkFixture["dispatched"] = [];
+    const messages: string[] = [];
+    const peer = makePeer(tempDir, true);
+    peer.dispatchToHub = (_source, path, data) => {
+        dispatched.push({ path, data });
+        return Promise.resolve();
+    };
+    peer.normalLog = (message) => { messages.push(message); };
+    chokidar.watch = (() => watcher as unknown as ReturnType<typeof chokidar.watch>) as typeof chokidar.watch;
+    try {
+        await Deno.writeTextFile(path, "still present");
+        await peer.start();
+        messages.length = 0;
+        await check({ path, watcher, dispatched, messages });
+    } finally {
+        Deno.stat = originalStat;
+        chokidar.watch = originalWatch;
+        watcher.finishClose();
+        await peer.stop();
+        await Deno.remove(tempDir, { recursive: true });
+    }
+}
+
+Deno.test("PeerStorage Chokidar unlink preserves an existing file", async () => {
+    await withChokidarUnlinkFixture(async ({ path, watcher, dispatched }) => {
+        await watcher.emitAsync("unlink", path);
+        assertEquals(await Deno.readTextFile(path), "still present", "source file should remain present");
+        assertEquals(dispatched.length, 0, "an existing file should not cause a hub deletion");
+    });
+});
+
+Deno.test("PeerStorage Chokidar unlink dispatches a confirmed deletion", async () => {
+    await withChokidarUnlinkFixture(async ({ path, watcher, dispatched }) => {
+        await Deno.remove(path);
+        await watcher.emitAsync("unlink", path);
+        assertEquals(dispatched.length, 1, "a real deletion should reach the hub once");
+        assertEquals(dispatched[0].path, "note.md", "deletion should use the global path");
+        assertEquals(dispatched[0].data, false, "hub notification should carry the deletion marker");
+    });
+});
+
+for (const [name, error] of [
+    ["permission", new Deno.errors.PermissionDenied("controlled permission failure")],
+    ["I/O", new Error("controlled I/O failure")],
+] as const) {
+    Deno.test(`PeerStorage Chokidar unlink preserves files after a stat ${name} error`, async () => {
+        await withChokidarUnlinkFixture(async ({ path, watcher, dispatched, messages }) => {
+            const originalStat = Deno.stat;
+            let statCalls = 0;
+            Deno.stat = ((statPath: string | URL) => {
+                if (statPath === path) {
+                    statCalls += 1;
+                    return Promise.reject(error);
+                }
+                return originalStat(statPath);
+            }) as typeof Deno.stat;
+            await watcher.emitAsync("unlink", path);
+            Deno.stat = originalStat;
+            assertEquals(await Deno.readTextFile(path), "still present", "a stat error should leave the source file present");
+            assertEquals(dispatched.length, 0, "a stat error should not cause a hub deletion");
+            assertEquals(statCalls, 1, "the handler should check the event path");
+            assert(messages.some((message) => message.includes("note.md")), "the failed check should be logged with its path");
+        });
+    });
+}

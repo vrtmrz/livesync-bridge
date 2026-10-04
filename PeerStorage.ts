@@ -359,20 +359,18 @@ export class PeerStorage extends Peer {
         })
         watcher.on("unlink", async (path) => {
             const ePath = this.toPosixPath(relative(this.toLocalPath("."), path));
-            // `awaitWriteFinish` debounces add and change, but not unlink.
-            // Writing a file in place (open -> write -> truncate) can therefore
-            // surface as an unlink even though the file is still there, and the
-            // deletion is then dispatched to every other peer.
-            //
-            // Confirm the file is actually gone before propagating a deletion:
-            // a missed deletion is repaired by the next scan, a wrongly
-            // propagated one is not.
+            // Confirm that the path is absent before propagating a deletion.
+            // Permission and I/O errors do not establish that the file is gone.
             try {
                 await Deno.stat(path);
                 this.debugLog(`Unlink ignored, file still exists: ${ePath}`);
                 return;
-            } catch (_e) {
-                // Not found - this is a real deletion.
+            } catch (ex) {
+                if (!(ex instanceof Deno.errors.NotFound)) {
+                    this.normalLog(`Unlink verification failed: ${ePath}`, LOG_LEVEL_NOTICE);
+                    Logger(ex, LOG_LEVEL_VERBOSE);
+                    return;
+                }
             }
             this.debugLog(`Unlink detected: ${ePath}`);
             await this.dispatchDeleted(path)
