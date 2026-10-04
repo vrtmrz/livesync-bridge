@@ -44,11 +44,31 @@ export class PeerStorage extends Peer {
     async put(pathSrc: string, data: FileData): Promise<boolean> {
         const lp = this.toLocalPath(pathSrc);
         const path = this.toStoragePath(lp);
-        if (await this.isRepeating(lp, data)) {
-            this.receiveLog(`${lp} save repeating`);
-            return false;
-        }
         try {
+            const incoming = data.data instanceof Uint8Array
+                ? data.data
+                : new TextEncoder().encode(getDocData(data.data));
+            // Preserve existing content when an empty payload conflicts with its reported size.
+            // Check before recording repeats so a later valid empty update can still be saved.
+            if (incoming.byteLength === 0 && data.size > 0) {
+                let existingSize = -1;
+                try {
+                    existingSize = (await Deno.stat(path)).size;
+                } catch (_e) {
+                    existingSize = -1;
+                }
+                if (existingSize > 0) {
+                    this.normalLog(
+                        `Empty write blocked: ${lp} (${existingSize} bytes on disk, ${data.size} bytes reported, 0 bytes received)`,
+                        LOG_LEVEL_NOTICE,
+                    );
+                    return false;
+                }
+            }
+            if (await this.isRepeating(lp, data)) {
+                this.receiveLog(`${lp} save repeating`);
+                return false;
+            }
             const dirName = dirname(path);
             try {
                 await Deno.mkdir(dirName, { recursive: true });
@@ -57,13 +77,8 @@ export class PeerStorage extends Peer {
                 console.log(ex);
             }
             const fp = await Deno.open(path, { read: true, write: true, create: true });
-            if (data.data instanceof Uint8Array) {
-                const writtensize = await fp.write(data.data);
-                await fp.truncate(writtensize);
-            } else {
-                const writtensize = await fp.write(new TextEncoder().encode(getDocData(data.data)));
-                await fp.truncate(writtensize);
-            }
+            const writtensize = await fp.write(incoming);
+            await fp.truncate(writtensize);
             await fp.utime(new Date(data.mtime), new Date(data.mtime));
             fp.close();
             this.receiveLog(`${lp} saved`);

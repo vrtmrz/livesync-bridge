@@ -1,4 +1,5 @@
 import chokidar from "chokidar";
+import { LOG_LEVEL_NOTICE } from "octagonal-wheels/common/logger";
 import { PeerStorage } from "./PeerStorage.ts";
 import type { FileData, PeerStorageConf } from "./types.ts";
 
@@ -216,6 +217,139 @@ Deno.test("PeerStorage Chokidar error clears health and stop waits for close", a
         assertEquals(watchers[1].closeCalls, 1, "stopping twice should not close an already released watcher");
     } finally {
         chokidar.watch = originalWatch;
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+function makeWritePeer(baseDir: string) {
+    const peer = makePeer(baseDir);
+    const settings = new Map<string, string>();
+    peer.setSetting = (key, value) => {
+        settings.set(key, value);
+    };
+    peer.getSetting = (key) => settings.get(key) ?? null;
+    const notices: string[] = [];
+    peer.normalLog = (message, level) => {
+        if (level === LOG_LEVEL_NOTICE) notices.push(message);
+    };
+    return { peer, notices };
+}
+
+function emptyFileData(data: FileData["data"], size = 0): FileData {
+    return { ctime: 1_700_000_000_000, mtime: 1_700_000_002_000, size, data };
+}
+
+const emptyFormats = [
+    { name: "text", filename: "note.md", empty: () => [""] },
+    { name: "text with no chunks", filename: "note.md", empty: () => [] },
+    { name: "binary", filename: "attachment.docx", empty: () => new Uint8Array(0) },
+];
+
+for (const format of emptyFormats) {
+    Deno.test(`PeerStorage accepts an intentional empty ${format.name} edit`, async () => {
+        const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-empty-edit-" });
+        try {
+            const { peer, notices } = makeWritePeer(tempDir);
+            const path = `${tempDir}/${format.filename}`;
+            await Deno.writeTextFile(path, "previous content");
+
+            const data = emptyFileData(format.empty());
+            const saved = await peer.put(format.filename, data);
+
+            assertEquals((await Deno.stat(path)).size, 0, "The destination should contain the empty edit");
+            assertEquals(saved, true, "A valid edit to an empty file should be saved");
+            assertEquals((await Deno.stat(path)).mtime?.getTime(), data.mtime, "The empty edit should update the modification time");
+            assertEquals(notices.length, 0, "A valid empty edit should not be blocked");
+        } finally {
+            await Deno.remove(tempDir, { recursive: true });
+        }
+    });
+
+    Deno.test(`PeerStorage creates a new empty ${format.name} file`, async () => {
+        const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-empty-new-" });
+        try {
+            const { peer } = makeWritePeer(tempDir);
+            const saved = await peer.put(format.filename, emptyFileData(format.empty()));
+            assertEquals(saved, true, "A new empty file should be created");
+            assertEquals((await Deno.stat(`${tempDir}/${format.filename}`)).size, 0, "The new file should be empty");
+        } finally {
+            await Deno.remove(tempDir, { recursive: true });
+        }
+    });
+
+    Deno.test(`PeerStorage preserves existing content for an empty ${format.name} payload with nonzero metadata`, async () => {
+        const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-empty-mismatch-" });
+        try {
+            const { peer, notices } = makeWritePeer(tempDir);
+            const path = `${tempDir}/${format.filename}`;
+            await Deno.writeTextFile(path, "previous content");
+            const originalMtime = (await Deno.stat(path)).mtime?.getTime();
+
+            const saved = await peer.put(format.filename, emptyFileData(format.empty(), 16));
+
+            assertEquals(saved, false, "An empty payload should be rejected when non-empty content is expected");
+            assertEquals(await Deno.readTextFile(path), "previous content", "The previous content should be preserved");
+            assertEquals((await Deno.stat(path)).mtime?.getTime(), originalMtime, "A blocked write should preserve the modification time");
+            assertEquals(notices.length, 1, "A rejected write should produce a notice");
+        } finally {
+            await Deno.remove(tempDir, { recursive: true });
+        }
+    });
+
+    Deno.test(`PeerStorage accepts an intentional empty ${format.name} edit after a mismatched empty payload`, async () => {
+        const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-empty-recovery-" });
+        try {
+            const { peer } = makeWritePeer(tempDir);
+            const path = `${tempDir}/${format.filename}`;
+            await Deno.writeTextFile(path, "previous content");
+
+            const blocked = await peer.put(format.filename, emptyFileData(format.empty(), 16));
+            assertEquals(blocked, false, "The mismatched payload should be blocked first");
+            const intentionalEdit = emptyFileData(format.empty());
+            intentionalEdit.mtime += 2000;
+            const saved = await peer.put(format.filename, intentionalEdit);
+
+            assertEquals((await Deno.stat(path)).size, 0, "A later valid empty edit should reach the destination");
+            assertEquals(saved, true, "The valid edit should not be mistaken for a repeated blocked write");
+        } finally {
+            await Deno.remove(tempDir, { recursive: true });
+        }
+    });
+}
+
+Deno.test("PeerStorage accepts a non-empty replacement", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-replacement-" });
+    try {
+        const { peer } = makeWritePeer(tempDir);
+        const path = `${tempDir}/note.md`;
+        await Deno.writeTextFile(path, "previous content");
+        const saved = await peer.put("note.md", {
+            ctime: 1_700_000_000_000,
+            mtime: 1_700_000_002_000,
+            size: 3,
+            data: ["new"],
+        });
+        assertEquals(saved, true, "A non-empty replacement should be saved");
+        assertEquals(await Deno.readTextFile(path), "new", "The previous content should be replaced exactly");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+Deno.test("PeerStorage logs each rejected empty write with its reported size", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-empty-notices-" });
+    try {
+        const { peer, notices } = makeWritePeer(tempDir);
+        const path = `${tempDir}/note.md`;
+        await Deno.writeTextFile(path, "previous content");
+        const data = emptyFileData([], 16);
+
+        assertEquals(await peer.put("note.md", data), false, "The first empty write should be blocked");
+        assertEquals(await peer.put("note.md", data), false, "The second empty write should be blocked");
+        assertEquals(notices.length, 2, "Each rejected input should produce a notice");
+        assert(notices.every((message) => message.includes("16 bytes reported")), "Notices should include the reported size");
+        assertEquals(await Deno.readTextFile(path), "previous content", "Repeated blocked writes should preserve the content");
+    } finally {
         await Deno.remove(tempDir, { recursive: true });
     }
 });
