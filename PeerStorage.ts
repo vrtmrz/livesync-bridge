@@ -1,7 +1,7 @@
 import { PeerStorageConf, FileData } from "./types.ts";
 import { delay, getDocData } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import { isPlainText } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/path";
-import { parse, format, relative, dirname, resolve } from "@std/path";
+import { parse, format, relative, dirname, resolve, isAbsolute } from "@std/path";
 import { format as posixFormat, parse as posixParse } from "@std/path/posix";
 import { scheduleOnceIfDuplicated } from "octagonal-wheels/concurrency/lock";
 import { DispatchFun, Peer, PeerHealth } from "./Peer.ts";
@@ -185,6 +185,7 @@ export class PeerStorage extends Peer {
     async dispatch(pathSrc: string) {
         const lP = this.toStoragePath(this.toLocalPath("."));
         const path = this.toPosixPath(relative(lP, pathSrc));
+        if (this.isOutsideBaseDir(path)) return;
 
         const data = await this.get(path);
 
@@ -206,6 +207,7 @@ export class PeerStorage extends Peer {
     async dispatchDeleted(pathSrc: string) {
         const lP = this.toStoragePath(this.toLocalPath("."));
         const path = this.toPosixPath(relative(lP, pathSrc));
+        if (this.isOutsideBaseDir(path)) return;
         await scheduleOnceIfDuplicated(pathSrc, async () => {
             await delay(250);
             if (!await this.isRepeating(path, false)) {
@@ -216,6 +218,17 @@ export class PeerStorage extends Peer {
 
     }
 
+    // A change outside this peer's baseDir must never reach the hub: "../Other/note.md" would be
+    // joined onto the other peers' baseDir and change a note outside their folder. Deno 2.6.9's
+    // watchFs delivers remove events of one watcher to every other watcher in the process.
+    isOutsideBaseDir(path: string) {
+        // either separator: on Windows the path can still read "..\Other/note.md"
+        if (/^\.\.([\\/]|$)/.test(path) || isAbsolute(path)) {
+            this.debugLog(`Ignored a change outside the base directory: ${path}`);
+            return true;
+        }
+        return false;
+    }
     toPosixPath(path: string) {
         const ret = posixFormat(parse(path));
         // this.debugLog(`**TOPOSIX ${path} -> ${ret}`)

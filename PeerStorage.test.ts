@@ -432,3 +432,28 @@ for (const [name, error] of [
         });
     });
 }
+
+Deno.test("PeerStorage ignores changes outside its base directory", async () => {
+    const vaultDir = await Deno.makeTempDir({ prefix: "peer-storage-outside-" });
+    try {
+        await Deno.mkdir(`${vaultDir}/Daily`);
+        await Deno.mkdir(`${vaultDir}/Other`);
+        await Deno.writeTextFile(`${vaultDir}/Other/present.md`, "text");
+        const peer = makePeer(`${vaultDir}/Daily/`);
+        const dispatched: string[] = [];
+        peer.dispatchToHub = (_source, path) => {
+            dispatched.push(path);
+            return Promise.resolve();
+        };
+
+        // what a watcher of another folder reports, e.g. Deno 2.6.9 handing on a remove event
+        await peer.dispatchDeleted(`${vaultDir}/Other/gone.md`);
+        await peer.dispatch(`${vaultDir}/Other/present.md`);
+        // dispatch() checks for repeats after 250 ms
+        await new Promise((resolve) => setTimeout(resolve, 400));
+
+        assertEquals(dispatched.join(", "), "", "A change outside the base directory should not reach the hub");
+    } finally {
+        await Deno.remove(vaultDir, { recursive: true });
+    }
+});
