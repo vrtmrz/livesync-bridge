@@ -1,4 +1,5 @@
 import chokidar from "chokidar";
+import { basename, join } from "@std/path";
 import { LOG_LEVEL_NOTICE } from "octagonal-wheels/common/logger";
 import { PeerStorage } from "./PeerStorage.ts";
 import type { FileData, PeerStorageConf } from "./types.ts";
@@ -239,6 +240,10 @@ function emptyFileData(data: FileData["data"], size = 0): FileData {
     return { ctime: 1_700_000_000_000, mtime: 1_700_000_002_000, size, data };
 }
 
+function textFileData(text: string): FileData {
+    return { ctime: 1_700_000_000_000, mtime: 1_700_000_002_000, size: text.length, data: [text] };
+}
+
 const emptyFormats = [
     { name: "text", filename: "note.md", empty: () => [""] },
     { name: "text with no chunks", filename: "note.md", empty: () => [] },
@@ -353,6 +358,41 @@ Deno.test("PeerStorage logs each rejected empty write with its reported size", a
         await Deno.remove(tempDir, { recursive: true });
     }
 });
+
+for (const [name, toBaseDir] of [
+    ["an absolute base directory", (dir: string) => `${dir}/`],
+    ["a ./ base directory", (dir: string) => `./${basename(dir)}/`],
+] as const) {
+    Deno.test(`PeerStorage does not send its own writes and deletions back to the hub with ${name}`, async () => {
+        const tempDir = await Deno.makeTempDir({ dir: Deno.cwd(), prefix: "peer-storage-echo-" });
+        try {
+            const { peer } = makeWritePeer(toBaseDir(tempDir));
+            const dispatched: string[] = [];
+            peer.dispatchToHub = (_source, path) => {
+                dispatched.push(path);
+                return Promise.resolve();
+            };
+            const paths = ["note.md", "a/b/note.md", "_templates/note.md"];
+            // The watcher reports paths with the platform separator.
+            const watchedPath = (path: string) => join(tempDir, ...path.split("/"));
+
+            for (const path of paths) {
+                assertEquals(await peer.put(path, textFileData("text")), true, `${path} should be saved`);
+                await peer.dispatch(watchedPath(path));
+            }
+            // dispatch() checks for repeats after 250 ms.
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            for (const path of paths) {
+                assertEquals(await peer.delete(path), true, `${path} should be deleted`);
+                await peer.dispatchDeleted(watchedPath(path));
+            }
+
+            assertEquals(dispatched.join(", "), "", "Received changes should not be sent back to the hub");
+        } finally {
+            await Deno.remove(tempDir, { recursive: true });
+        }
+    });
+}
 
 type ChokidarUnlinkFixture = {
     path: string;
