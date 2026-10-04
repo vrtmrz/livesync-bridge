@@ -44,37 +44,13 @@ export class PeerStorage extends Peer {
     async put(pathSrc: string, data: FileData): Promise<boolean> {
         const lp = this.toLocalPath(pathSrc);
         const path = this.toStoragePath(lp);
-        if (await this.isRepeating(lp, data)) {
-            this.receiveLog(`${lp} save repeating`);
-            return false;
-        }
         try {
-            const dirName = dirname(path);
-            try {
-                await Deno.mkdir(dirName, { recursive: true });
-            } catch (ex) {
-                // While recursive is true, mkdir will not raise the `AlreadyExist`.
-                console.log(ex);
-            }
-            // Refuse to truncate an existing file to zero length.
-            //
-            // We have observed the remote read occasionally yielding an empty
-            // payload while the document itself is intact: other peers sharing
-            // the same database receive the same change and write the correct
-            // content. Because put() wrote whatever it was handed and then
-            // truncated to the written length, a single bad read silently
-            // emptied a live file on disk.
-            //
-            // The file count stays the same and nothing is logged, so the loss
-            // is invisible until someone opens the note. If the empty copy then
-            // propagates to the remaining peers, the content is gone for good.
-            //
-            // An empty write over existing content is never something the user
-            // asked for, so treat it as a failed read rather than as data.
             const incoming = data.data instanceof Uint8Array
                 ? data.data
                 : new TextEncoder().encode(getDocData(data.data));
-            if (incoming.byteLength === 0) {
+            // Preserve existing content when an empty payload conflicts with its reported size.
+            // Check before recording repeats so a later valid empty update can still be saved.
+            if (incoming.byteLength === 0 && data.size > 0) {
                 let existingSize = -1;
                 try {
                     existingSize = (await Deno.stat(path)).size;
@@ -83,11 +59,22 @@ export class PeerStorage extends Peer {
                 }
                 if (existingSize > 0) {
                     this.normalLog(
-                        `Empty write blocked: ${lp} (${existingSize} bytes on disk, 0 bytes received)`,
+                        `Empty write blocked: ${lp} (${existingSize} bytes on disk, ${data.size} bytes reported, 0 bytes received)`,
                         LOG_LEVEL_NOTICE,
                     );
                     return false;
                 }
+            }
+            if (await this.isRepeating(lp, data)) {
+                this.receiveLog(`${lp} save repeating`);
+                return false;
+            }
+            const dirName = dirname(path);
+            try {
+                await Deno.mkdir(dirName, { recursive: true });
+            } catch (ex) {
+                // While recursive is true, mkdir will not raise the `AlreadyExist`.
+                console.log(ex);
             }
             const fp = await Deno.open(path, { read: true, write: true, create: true });
             const writtensize = await fp.write(incoming);
