@@ -239,6 +239,10 @@ function emptyFileData(data: FileData["data"], size = 0): FileData {
     return { ctime: 1_700_000_000_000, mtime: 1_700_000_002_000, size, data };
 }
 
+function textFileData(text: string): FileData {
+    return { ctime: 1_700_000_000_000, mtime: 1_700_000_002_000, size: text.length, data: [text] };
+}
+
 const emptyFormats = [
     { name: "text", filename: "note.md", empty: () => [""] },
     { name: "text with no chunks", filename: "note.md", empty: () => [] },
@@ -432,3 +436,46 @@ for (const [name, error] of [
         });
     });
 }
+
+Deno.test("PeerStorage converts every Windows separator to a vault path", () => {
+    const peer = makePeer("vault/");
+    peer.pathSeparator = "\\";
+    assertEquals(peer.toPosixPath("note.md"), "note.md", "A top-level file should stay as it is");
+    assertEquals(peer.toPosixPath("a\\note.md"), "a/note.md", "One folder should be converted");
+    assertEquals(peer.toPosixPath("a\\b\\c\\note.md"), "a/b/c/note.md",
+        "Every separator should be converted, not only the last one");
+    assertEquals(peer.toPosixPath("_attachments\\a\\image.png"), "_attachments/a/image.png",
+        "A leading underscore should be preserved");
+});
+
+Deno.test("PeerStorage keeps POSIX paths unchanged", () => {
+    const peer = makePeer("vault/");
+    peer.pathSeparator = "/";
+    for (const path of ["note.md", "a/b/c/note.md", "_attachments/a/image.png"]) {
+        assertEquals(peer.toPosixPath(path), path, `${path} should stay as it is`);
+        assertEquals(peer.isUnsafeVaultPath(path), false, `${path} should be accepted`);
+    }
+    assertEquals(peer.isUnsafeVaultPath("a\\b.md"), false, "A backslash in a file name should be accepted");
+});
+
+Deno.test("PeerStorage on Windows skips writes and deletions of paths with a backslash", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-windows-path-" });
+    try {
+        const { peer, notices } = makeWritePeer(tempDir);
+        peer.pathSeparator = "\\";
+        await Deno.mkdir(`${tempDir}/a/b`, { recursive: true });
+        await Deno.writeTextFile(`${tempDir}/a/b/note.md`, "real note");
+
+        const deleted = await peer.delete("a\\b/note.md");
+        const saved = await peer.put("a\\b/other.md", textFileData("text"));
+
+        assertEquals(deleted, false, "A deletion of a path with a backslash should be skipped");
+        assertEquals(saved, false, "A write of a path with a backslash should be skipped");
+        assertEquals(await Deno.readTextFile(`${tempDir}/a/b/note.md`), "real note", "The real note should stay");
+        assertEquals(notices.length, 2, "Each skipped path should produce a notice");
+        assert(notices[0].startsWith("Delete skipped: "), "The deletion should be skipped by the path check");
+        assert(notices[1].startsWith("Write skipped: "), "The write should be skipped by the path check");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
