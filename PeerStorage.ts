@@ -1,7 +1,7 @@
 import { PeerStorageConf, FileData } from "./types.ts";
 import { delay, getDocData } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import { isPlainText } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/path";
-import { parse, format, relative, dirname, resolve } from "@std/path";
+import { parse, format, relative, dirname, resolve, SEPARATOR } from "@std/path";
 import { format as posixFormat, parse as posixParse } from "@std/path/posix";
 import { scheduleOnceIfDuplicated } from "octagonal-wheels/concurrency/lock";
 import { DispatchFun, Peer, PeerHealth } from "./Peer.ts";
@@ -18,6 +18,8 @@ import {
 
 export class PeerStorage extends Peer {
     declare config: PeerStorageConf;
+    // The platform's path separator; a field so tests can simulate Windows on any OS.
+    pathSeparator: string = SEPARATOR;
 
 
     constructor(conf: PeerStorageConf, dispatcher: DispatchFun) {
@@ -25,6 +27,10 @@ export class PeerStorage extends Peer {
     }
 
     async delete(pathSrc: string): Promise<boolean> {
+        if (this.isUnsafeVaultPath(pathSrc)) {
+            this.normalLog(`Delete skipped: ${pathSrc} (the path contains the local path separator)`, LOG_LEVEL_NOTICE);
+            return false;
+        }
         const lp = this.toLocalPath(pathSrc);
         const path = this.toStoragePath(lp);
         if (await this.isRepeating(lp, false)) {
@@ -42,6 +48,10 @@ export class PeerStorage extends Peer {
         return true;
     }
     async put(pathSrc: string, data: FileData): Promise<boolean> {
+        if (this.isUnsafeVaultPath(pathSrc)) {
+            this.normalLog(`Write skipped: ${pathSrc} (the path contains the local path separator)`, LOG_LEVEL_NOTICE);
+            return false;
+        }
         const lp = this.toLocalPath(pathSrc);
         const path = this.toStoragePath(lp);
         try {
@@ -216,10 +226,17 @@ export class PeerStorage extends Peer {
 
     }
 
+    // Vault paths always use "/". On Windows, posixFormat(parse()) only converts the separator
+    // before the file name ("a\b\c.md" -> "a\b/c.md"), so convert every separator instead.
     toPosixPath(path: string) {
-        const ret = posixFormat(parse(path));
+        const ret = this.pathSeparator === "/" ? posixFormat(parse(path)) : path.replaceAll(this.pathSeparator, "/");
         // this.debugLog(`**TOPOSIX ${path} -> ${ret}`)
         return ret;
+    }
+    // On Windows, a vault path containing "\" (a file name with a backslash, or "a\b/c.md"
+    // as written by earlier versions) resolves to a different file: never write or delete it.
+    isUnsafeVaultPath(path: string) {
+        return this.pathSeparator !== "/" && path.includes(this.pathSeparator);
     }
     toStoragePath(path: string) {
         const ret = resolve(format(posixParse(path)));
