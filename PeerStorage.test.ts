@@ -394,6 +394,32 @@ for (const [name, toBaseDir] of [
     });
 }
 
+Deno.test("PeerStorage forwards local edits after suppressing a received nested write", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-local-edit-" });
+    try {
+        const { peer } = makeWritePeer(tempDir);
+        const filename = "_templates/a/note.md";
+        const path = join(tempDir, ...filename.split("/"));
+        const dispatched: string[] = [];
+        peer.dispatchToHub = (_source, path) => {
+            dispatched.push(path);
+            return Promise.resolve();
+        };
+
+        assertEquals(await peer.put(filename, textFileData("text")), true, "The received file should be saved");
+        await peer.dispatch(path);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        assertEquals(dispatched.length, 0, "The received write should be suppressed");
+
+        await Deno.writeTextFile(path, "local edit");
+        await peer.dispatch(path);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        assertEquals(dispatched.join(", "), filename, "A later local edit should reach the hub");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
 type ChokidarUnlinkFixture = {
     path: string;
     watcher: ControlledChokidarWatcher;
