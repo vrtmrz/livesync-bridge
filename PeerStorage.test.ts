@@ -541,3 +541,90 @@ Deno.test("PeerStorage on Windows skips writes and deletions of paths with a bac
         await Deno.remove(tempDir, { recursive: true });
     }
 });
+
+Deno.test("PeerStorage ignores changes outside its base directory", async () => {
+    const vaultDir = await Deno.makeTempDir({ prefix: "peer-storage-outside-" });
+    try {
+        await Deno.mkdir(`${vaultDir}/Daily`);
+        await Deno.mkdir(`${vaultDir}/Other`);
+        await Deno.writeTextFile(`${vaultDir}/Other/present.md`, "text");
+        const { peer } = makeWritePeer(`${vaultDir}/Daily/`);
+        const dispatched: string[] = [];
+        peer.dispatchToHub = (_source, path) => {
+            dispatched.push(path);
+            return Promise.resolve();
+        };
+
+        // what a watcher of another folder reports, e.g. Deno 2.6.9 handing on a remove event
+        await peer.dispatchDeleted(`${vaultDir}/Other/gone.md`);
+        await peer.dispatch(`${vaultDir}/Other/present.md`);
+        // dispatch() checks for repeats after 250 ms
+        await new Promise((resolve) => setTimeout(resolve, 400));
+
+        assertEquals(dispatched.join(", "), "", "A change outside the base directory should not reach the hub");
+    } finally {
+        await Deno.remove(vaultDir, { recursive: true });
+    }
+});
+
+for (const kind of ["change", "deletion"] as const) {
+    Deno.test({
+        name: `PeerStorage dispatches a POSIX backslash filename on ${kind}`,
+        ignore: Deno.build.os === "windows",
+        async fn() {
+            const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-posix-backslash-" });
+            try {
+                const filename = "..\\draft.md";
+                const path = join(tempDir, filename);
+                const { peer } = makeWritePeer(tempDir);
+                const dispatched: { path: string; deleted: boolean }[] = [];
+                peer.dispatchToHub = (_source, path, data) => {
+                    dispatched.push({ path, deleted: data === false });
+                    return Promise.resolve();
+                };
+                await Deno.writeTextFile(path, "draft");
+
+                if (kind === "deletion") {
+                    await Deno.remove(path);
+                    await peer.dispatchDeleted(path);
+                } else {
+                    await peer.dispatch(path);
+                    // dispatch() checks for repeats after 250 ms.
+                    await new Promise((resolve) => setTimeout(resolve, 400));
+                }
+
+                assertEquals(dispatched.length, 1, "A filename inside baseDir should reach the hub");
+                assertEquals(dispatched[0].path, filename, "A POSIX backslash should stay part of the filename");
+                assertEquals(dispatched[0].deleted, kind === "deletion", "The event should keep its change or deletion kind");
+            } finally {
+                await Deno.remove(tempDir, { recursive: true });
+            }
+        },
+    });
+}
+
+Deno.test("PeerStorage ignores sibling events with a similar base directory prefix", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-prefix-" });
+    try {
+        const baseDir = join(tempDir, "vault");
+        const siblingDir = join(tempDir, "vault-old");
+        await Deno.mkdir(baseDir);
+        await Deno.mkdir(siblingDir);
+        const { peer } = makeWritePeer(baseDir);
+        const dispatched: string[] = [];
+        peer.dispatchToHub = (_source, path) => {
+            dispatched.push(path);
+            return Promise.resolve();
+        };
+        const present = join(siblingDir, "present.md");
+        await Deno.writeTextFile(present, "text");
+
+        await peer.dispatch(present);
+        await peer.dispatchDeleted(join(siblingDir, "gone.md"));
+        await new Promise((resolve) => setTimeout(resolve, 400));
+
+        assertEquals(dispatched.length, 0, "A similarly named sibling directory should stay outside baseDir");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
