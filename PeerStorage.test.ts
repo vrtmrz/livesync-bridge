@@ -1,5 +1,5 @@
 import chokidar from "chokidar";
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import { LOG_LEVEL_NOTICE } from "octagonal-wheels/common/logger";
 import { PeerStorage } from "./PeerStorage.ts";
 import type { FileData, PeerStorageConf } from "./types.ts";
@@ -240,6 +240,10 @@ function emptyFileData(data: FileData["data"], size = 0): FileData {
     return { ctime: 1_700_000_000_000, mtime: 1_700_000_002_000, size, data };
 }
 
+function textFileData(text: string): FileData {
+    return { ctime: 1_700_000_000_000, mtime: 1_700_000_002_000, size: text.length, data: [text] };
+}
+
 const emptyFormats = [
     { name: "text", filename: "note.md", empty: () => [""] },
     { name: "text with no chunks", filename: "note.md", empty: () => [] },
@@ -355,6 +359,67 @@ Deno.test("PeerStorage logs each rejected empty write with its reported size", a
     }
 });
 
+for (const [name, toBaseDir] of [
+    ["an absolute base directory", (dir: string) => `${dir}/`],
+    ["a ./ base directory", (dir: string) => `./${basename(dir)}/`],
+] as const) {
+    Deno.test(`PeerStorage does not send its own writes and deletions back to the hub with ${name}`, async () => {
+        const tempDir = await Deno.makeTempDir({ dir: Deno.cwd(), prefix: "peer-storage-echo-" });
+        try {
+            const { peer } = makeWritePeer(toBaseDir(tempDir));
+            const dispatched: string[] = [];
+            peer.dispatchToHub = (_source, path) => {
+                dispatched.push(path);
+                return Promise.resolve();
+            };
+            const paths = ["note.md", "a/b/note.md", "_templates/note.md"];
+            // The watcher reports paths with the platform separator.
+            const watchedPath = (path: string) => join(tempDir, ...path.split("/"));
+
+            for (const path of paths) {
+                assertEquals(await peer.put(path, textFileData("text")), true, `${path} should be saved`);
+                await peer.dispatch(watchedPath(path));
+            }
+            // dispatch() checks for repeats after 250 ms.
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            for (const path of paths) {
+                assertEquals(await peer.delete(path), true, `${path} should be deleted`);
+                await peer.dispatchDeleted(watchedPath(path));
+            }
+
+            assertEquals(dispatched.join(", "), "", "Received changes should not be sent back to the hub");
+        } finally {
+            await Deno.remove(tempDir, { recursive: true });
+        }
+    });
+}
+
+Deno.test("PeerStorage forwards local edits after suppressing a received nested write", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-local-edit-" });
+    try {
+        const { peer } = makeWritePeer(tempDir);
+        const filename = "_templates/a/note.md";
+        const path = join(tempDir, ...filename.split("/"));
+        const dispatched: string[] = [];
+        peer.dispatchToHub = (_source, path) => {
+            dispatched.push(path);
+            return Promise.resolve();
+        };
+
+        assertEquals(await peer.put(filename, textFileData("text")), true, "The received file should be saved");
+        await peer.dispatch(path);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        assertEquals(dispatched.length, 0, "The received write should be suppressed");
+
+        await Deno.writeTextFile(path, "local edit");
+        await peer.dispatch(path);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        assertEquals(dispatched.join(", "), filename, "A later local edit should reach the hub");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
 type ChokidarUnlinkFixture = {
     path: string;
     watcher: ControlledChokidarWatcher;
@@ -433,6 +498,49 @@ for (const [name, error] of [
         });
     });
 }
+
+Deno.test("PeerStorage converts every Windows separator to a vault path", () => {
+    const peer = makePeer("vault/");
+    peer.pathSeparator = "\\";
+    assertEquals(peer.toPosixPath("note.md"), "note.md", "A top-level file should stay as it is");
+    assertEquals(peer.toPosixPath("a\\note.md"), "a/note.md", "One folder should be converted");
+    assertEquals(peer.toPosixPath("a\\b\\c\\note.md"), "a/b/c/note.md",
+        "Every separator should be converted, not only the last one");
+    assertEquals(peer.toPosixPath("_attachments\\a\\image.png"), "_attachments/a/image.png",
+        "A leading underscore should be preserved");
+});
+
+Deno.test("PeerStorage keeps POSIX paths unchanged", () => {
+    const peer = makePeer("vault/");
+    peer.pathSeparator = "/";
+    for (const path of ["note.md", "a/b/c/note.md", "_attachments/a/image.png"]) {
+        assertEquals(peer.toPosixPath(path), path, `${path} should stay as it is`);
+        assertEquals(peer.isUnsafeVaultPath(path), false, `${path} should be accepted`);
+    }
+    assertEquals(peer.isUnsafeVaultPath("a\\b.md"), false, "A backslash in a file name should be accepted");
+});
+
+Deno.test("PeerStorage on Windows skips writes and deletions of paths with a backslash", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-windows-path-" });
+    try {
+        const { peer, notices } = makeWritePeer(tempDir);
+        peer.pathSeparator = "\\";
+        await Deno.mkdir(`${tempDir}/a/b`, { recursive: true });
+        await Deno.writeTextFile(`${tempDir}/a/b/note.md`, "real note");
+
+        const deleted = await peer.delete("a\\b/note.md");
+        const saved = await peer.put("a\\b/other.md", textFileData("text"));
+
+        assertEquals(deleted, false, "A deletion of a path with a backslash should be skipped");
+        assertEquals(saved, false, "A write of a path with a backslash should be skipped");
+        assertEquals(await Deno.readTextFile(`${tempDir}/a/b/note.md`), "real note", "The real note should stay");
+        assertEquals(notices.length, 2, "Each skipped path should produce a notice");
+        assert(notices[0].startsWith("Delete skipped: "), "The deletion should be skipped by the path check");
+        assert(notices[1].startsWith("Write skipped: "), "The write should be skipped by the path check");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
 
 Deno.test("PeerStorage ignores changes outside its base directory", async () => {
     const vaultDir = await Deno.makeTempDir({ prefix: "peer-storage-outside-" });
