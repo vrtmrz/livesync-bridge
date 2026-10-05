@@ -1,4 +1,5 @@
 import chokidar from "chokidar";
+import { basename, join } from "@std/path";
 import { LOG_LEVEL_NOTICE } from "octagonal-wheels/common/logger";
 import { PeerStorage } from "./PeerStorage.ts";
 import type { FileData, PeerStorageConf } from "./types.ts";
@@ -353,6 +354,67 @@ Deno.test("PeerStorage logs each rejected empty write with its reported size", a
         assertEquals(notices.length, 2, "Each rejected input should produce a notice");
         assert(notices.every((message) => message.includes("16 bytes reported")), "Notices should include the reported size");
         assertEquals(await Deno.readTextFile(path), "previous content", "Repeated blocked writes should preserve the content");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+for (const [name, toBaseDir] of [
+    ["an absolute base directory", (dir: string) => `${dir}/`],
+    ["a ./ base directory", (dir: string) => `./${basename(dir)}/`],
+] as const) {
+    Deno.test(`PeerStorage does not send its own writes and deletions back to the hub with ${name}`, async () => {
+        const tempDir = await Deno.makeTempDir({ dir: Deno.cwd(), prefix: "peer-storage-echo-" });
+        try {
+            const { peer } = makeWritePeer(toBaseDir(tempDir));
+            const dispatched: string[] = [];
+            peer.dispatchToHub = (_source, path) => {
+                dispatched.push(path);
+                return Promise.resolve();
+            };
+            const paths = ["note.md", "a/b/note.md", "_templates/note.md"];
+            // The watcher reports paths with the platform separator.
+            const watchedPath = (path: string) => join(tempDir, ...path.split("/"));
+
+            for (const path of paths) {
+                assertEquals(await peer.put(path, textFileData("text")), true, `${path} should be saved`);
+                await peer.dispatch(watchedPath(path));
+            }
+            // dispatch() checks for repeats after 250 ms.
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            for (const path of paths) {
+                assertEquals(await peer.delete(path), true, `${path} should be deleted`);
+                await peer.dispatchDeleted(watchedPath(path));
+            }
+
+            assertEquals(dispatched.join(", "), "", "Received changes should not be sent back to the hub");
+        } finally {
+            await Deno.remove(tempDir, { recursive: true });
+        }
+    });
+}
+
+Deno.test("PeerStorage forwards local edits after suppressing a received nested write", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-local-edit-" });
+    try {
+        const { peer } = makeWritePeer(tempDir);
+        const filename = "_templates/a/note.md";
+        const path = join(tempDir, ...filename.split("/"));
+        const dispatched: string[] = [];
+        peer.dispatchToHub = (_source, path) => {
+            dispatched.push(path);
+            return Promise.resolve();
+        };
+
+        assertEquals(await peer.put(filename, textFileData("text")), true, "The received file should be saved");
+        await peer.dispatch(path);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        assertEquals(dispatched.length, 0, "The received write should be suppressed");
+
+        await Deno.writeTextFile(path, "local edit");
+        await peer.dispatch(path);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        assertEquals(dispatched.join(", "), filename, "A later local edit should reach the hub");
     } finally {
         await Deno.remove(tempDir, { recursive: true });
     }

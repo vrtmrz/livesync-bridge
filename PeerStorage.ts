@@ -33,7 +33,8 @@ export class PeerStorage extends Peer {
         }
         const lp = this.toLocalPath(pathSrc);
         const path = this.toStoragePath(lp);
-        if (await this.isRepeating(lp, false)) {
+        // Keyed by the vault path, like dispatchDeleted(), so the resulting watcher event is a repeat.
+        if (await this.isRepeating(pathSrc, false)) {
             return false;
         }
         try {
@@ -75,7 +76,8 @@ export class PeerStorage extends Peer {
                     return false;
                 }
             }
-            if (await this.isRepeating(lp, data)) {
+            // Keyed by the vault path, like dispatch(), so the resulting watcher event is a repeat.
+            if (await this.isRepeating(pathSrc, data)) {
                 this.receiveLog(`${lp} save repeating`);
                 return false;
             }
