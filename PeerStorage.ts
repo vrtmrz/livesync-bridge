@@ -1,7 +1,7 @@
 import { PeerStorageConf, FileData } from "./types.ts";
 import { delay, getDocData } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import { isPlainText } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/path";
-import { parse, format, relative, dirname, resolve, isAbsolute } from "@std/path";
+import { parse, format, relative, dirname, resolve, isAbsolute, SEPARATOR } from "@std/path";
 import { format as posixFormat, parse as posixParse } from "@std/path/posix";
 import { scheduleOnceIfDuplicated } from "octagonal-wheels/concurrency/lock";
 import { DispatchFun, Peer, PeerHealth } from "./Peer.ts";
@@ -222,8 +222,10 @@ export class PeerStorage extends Peer {
     // joined onto the other peers' baseDir and change a note outside their folder. Deno 2.6.9's
     // watchFs delivers remove events of one watcher to every other watcher in the process.
     isOutsideBaseDir(path: string) {
-        // either separator: on Windows the path can still read "..\Other/note.md"
-        if (/^\.\.([\\/]|$)/.test(path) || isAbsolute(path)) {
+        // Backslashes are filename characters on POSIX and separators on Windows.
+        const hasParentPrefix = path === ".." || path.startsWith("../") ||
+            (SEPARATOR === "\\" && path.startsWith("..\\"));
+        if (hasParentPrefix || isAbsolute(path)) {
             this.debugLog(`Ignored a change outside the base directory: ${path}`);
             return true;
         }
