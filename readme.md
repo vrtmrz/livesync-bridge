@@ -136,6 +136,7 @@ The configuration file consists of the following structure.
       "minimumChunkSize": 20,
       "passphrase": "passphrase", // E2EE passphrase, if you do not enabled, leave it blank.
       "obfuscatePassphrase": "passphrase", // Path obfuscation passphrase. Leave blank to disable it; this may differ from passphrase.
+      "idDerivationKey": "sls-id-v1:...", // ID key of the vault, if it uses one (see below). Omit it otherwise.
       "baseDir": "blog/", // Sharing folder
       "includeInternal": [".claude/**"], // Opt-in glob patterns for internal/hidden files (see caution below). Omit to keep the default of skipping them.
       "useRemoteTweaks":true // Overwrite customChunkSize or minimumChunkSize, and check configuration matches
@@ -171,6 +172,26 @@ The configuration file consists of the following structure.
   ]
 }
 ```
+
+## Vaults with an ID key
+
+Recent versions of Self-hosted LiveSync derive chunk IDs and obfuscated document IDs from a separate ID key. New vaults with E2EE get a random ID key by default. The bridge needs the same key, or the plugin cannot read the files the bridge writes. It then reports that not all files could be synchronised.
+
+Copy the key on any device with **Show current recovery code** in the plugin settings, and set it as `idDerivationKey`:
+
+```jsonc
+{
+  "type": "couchdb",
+  "name": "test1",
+  // ...
+  "passphrase": "passphrase",
+  "obfuscatePassphrase": "passphrase",
+  "idDerivationKey": "sls-id-v1:0123...cdef", // The recovery code, or the 64-character hex key on its own
+  "useRemoteTweaks": true
+}
+```
+
+With a key configured, the bridge uses ID derivation version 1 unless `idDerivationVersion` says otherwise. Keep the key private, like the passphrase.
 
 ## Synchronising internal/hidden files
 

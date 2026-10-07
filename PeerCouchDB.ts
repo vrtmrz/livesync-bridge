@@ -8,6 +8,7 @@ import { PeerCouchDBConf, FileData } from "./types.ts";
 import { decodeBinary } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/convert";
 import { isPlainText } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/path";
 import { DispatchFun, Peer, PeerHealth } from "./Peer.ts";
+import { normaliseIdDerivationKey } from "./util.ts";
 import {
     createBinaryBlob,
     createTextBlob,
@@ -32,6 +33,12 @@ export class PeerCouchDB extends Peer {
     private _remoteEmpty = false;
     constructor(conf: PeerCouchDBConf, dispatcher: DispatchFun) {
         super(conf, dispatcher);
+        const idDerivationKey = normaliseIdDerivationKey(this.config.idDerivationKey);
+        if (idDerivationKey) {
+            this.config.idDerivationKey = idDerivationKey;
+            // The manipulator checks remote document IDs before remote tweaks are applied, so a configured key must select version 1 up front
+            this.config.idDerivationVersion ??= 1;
+        }
         // The manipulator is built lazily in start(), only after a probe confirms
         // CouchDB is reachable. Building it here would start its one-shot init
         // against a possibly-down CouchDB, then discard and rebuild it on the
@@ -247,6 +254,8 @@ export class PeerCouchDB extends Peer {
                     this.config.customChunkSize = tweaks.customChunkSize ?? this.config.customChunkSize;
                     this.config.doNotUseFixedRevisionForChunks = tweaks.doNotUseFixedRevisionForChunks ?? this.config.doNotUseFixedRevisionForChunks;
                     this.config.handleFilenameCaseSensitive = tweaks.handleFilenameCaseSensitive ?? this.config.handleFilenameCaseSensitive;
+                    this.config.idDerivationVersion = tweaks.idDerivationVersion ?? this.config.idDerivationVersion;
+                    this.config.encryptInternalMetadata = tweaks.encryptInternalMetadata ?? this.config.encryptInternalMetadata;
                     const newConf = { ...this.config } as Record<string, any>;
                     this.man.options = this.config;
                     await this.man.liveSyncLocalDB.initializeDatabase()
