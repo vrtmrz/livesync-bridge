@@ -49,11 +49,61 @@ export class PeerCouchDB extends Peer {
         const prev = this.man as DirectFileManipulator | undefined;
         this.man = new DirectFileManipulator(this.config, {
             // Bypass node:http compatibility shims for Deno, Traefik, and long-polling connections.
-            fetch: (request, init) => globalThis.fetch(request, init),
+            // _changes requests additionally get an idle-timeout: a silently dead TCP
+            // connection (suspend/VPN flap) otherwise stalls the live feed forever with
+            // `watching` still true — invisible to health checks. Aborting on idle turns
+            // that into a normal feed error, which the watch's own 10s reconnect handles.
+            fetch: (request, init) => this._fetchWithIdleTimeout(request, init),
         });
-        // Fetch remote since.
+        // Resume from the persisted checkpoint. If there is none, leave "now" as a
+        // marker; _connectAndWatch resolves it to the current update_seq (and persists
+        // it) before the watch starts, so later restarts never skip missed changes.
         this.man.since = this.getSetting("since") || "now";
         if (prev) void prev.close().catch(() => {});
+    }
+
+    // How long the _changes feed may go without a single byte before we consider the
+    // connection dead. PouchDB requests heartbeat newlines every ~10s, so a healthy
+    // but idle feed still produces traffic well within this window.
+    private static readonly CHANGES_IDLE_TIMEOUT_MS = 90_000;
+    private _fetchWithIdleTimeout(request: Request | URL | string, init?: RequestInit): Promise<Response> {
+        const url = typeof request === "string" ? request : (request instanceof URL ? request.href : request.url);
+        if (!url.includes("/_changes")) return globalThis.fetch(request, init);
+        const ctrl = new AbortController();
+        const outerSignal = init?.signal ?? (request instanceof Request ? request.signal : undefined);
+        if (outerSignal) {
+            if (outerSignal.aborted) ctrl.abort(outerSignal.reason);
+            else outerSignal.addEventListener("abort", () => ctrl.abort(outerSignal.reason), { once: true });
+        }
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const arm = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+                this.normalLog(`_changes feed idle for ${PeerCouchDB.CHANGES_IDLE_TIMEOUT_MS / 1000}s — aborting dead connection.`, LOG_LEVEL_NOTICE);
+                ctrl.abort(new Error("changes feed idle timeout"));
+            }, PeerCouchDB.CHANGES_IDLE_TIMEOUT_MS);
+        };
+        arm();
+        return globalThis.fetch(request, { ...init, signal: ctrl.signal }).then((res) => {
+            if (!res.body) {
+                clearTimeout(timer);
+                return res;
+            }
+            arm();
+            const monitored = res.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+                transform(chunk, controller) {
+                    arm();
+                    controller.enqueue(chunk);
+                },
+                flush() {
+                    clearTimeout(timer);
+                },
+            }));
+            return new Response(monitored, { status: res.status, statusText: res.statusText, headers: res.headers });
+        }, (e) => {
+            clearTimeout(timer);
+            throw e;
+        });
     }
     async delete(pathSrc: string): Promise<boolean> {
         await this._started.promise;
@@ -136,7 +186,7 @@ export class PeerCouchDB extends Peer {
     // JSON. A half-ready CouchDB (or a proxy error page) returns a non-JSON body —
     // exactly the case that used to crash the bridge — so we treat it as "not
     // ready yet" and let the caller retry, fast, instead of waiting on a hung init.
-    private async _probeCouch(timeoutMs = 10000): Promise<void> {
+    private async _probeCouch(timeoutMs = 10000): Promise<Record<string, unknown>> {
         // Read straight from config (the manipulator may not be built yet, and these
         // are the same credentials it will use).
         const url = `${this.config.url}/${this.config.database}`;
@@ -156,7 +206,8 @@ export class PeerCouchDB extends Peer {
             await res.body?.cancel();
             throw new Error(`CouchDB not ready: HTTP ${res.status}`);
         }
-        await res.json();
+        // The db info doc — callers use update_seq to seed the watch checkpoint.
+        return await res.json() as Record<string, unknown>;
     }
 
     // Is CouchDB up and serving right now? Uses the same success threshold as the
@@ -274,10 +325,19 @@ export class PeerCouchDB extends Peer {
                 this.man.since = "";
                 this.normalLog(`Remote database looks like rebuilt. fetch from the first again.`);
                 this.setSetting("remote-created", `${created}`);
-            } else {
-                this.normalLog(`Watch starting from ${this.man.since}`);
             }
-            this.man.beginWatch(async (entry) => {
+            // No persisted checkpoint ("now" is only the placeholder from
+            // _buildManipulator): pin the watch to the current update_seq and persist
+            // it. From here on the checkpoint advances with every processed change, so
+            // a restart resumes exactly where the previous run stopped instead of
+            // silently skipping everything that arrived in between.
+            if (this.man.since === "now") {
+                const info = await this._probeCouch();
+                this.man.since = `${info["update_seq"] ?? ""}`;
+                this.setSetting("since", this.man.since);
+            }
+            this.normalLog(`Watch starting from ${this.man.since || "the first"}`);
+            this.man.beginWatch(async (entry, seq) => {
                 const d = entry.type == "plain" ? entry.data : new Uint8Array(decodeBinary(entry.data));
                 let path = entry.path.substring(baseDir.length);
                 if (path.startsWith("/")) {
@@ -294,8 +354,15 @@ export class PeerCouchDB extends Peer {
                     this.sendLog(`${path} change detected`);
                     await this.dispatch(path, docData);
                 }
+                // Advance the checkpoint only after the change has been dispatched —
+                // at-least-once: a crash in between replays this seq, and the content
+                // dedup (isRepeating / Skipped-Same) absorbs the repeat. This also keeps
+                // the watch's own reconnect (which re-reads man.since) gap-free.
+                if (seq !== undefined) {
+                    this.man.since = seq as string;
+                    this.setSetting("since", `${seq}`);
+                }
             }, (entry) => {
-                this.setSetting("since", this.man.since);
                 if (entry.path.indexOf(":") !== -1) {
                     if (this.config.includeInternal && entry.path.startsWith("i:")) {
                         const stripped = entry.path.substring(2);
