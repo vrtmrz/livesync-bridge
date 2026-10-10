@@ -277,7 +277,7 @@ export class PeerCouchDB extends Peer {
             } else {
                 this.normalLog(`Watch starting from ${this.man.since}`);
             }
-            this.man.beginWatch(async (entry) => {
+            this.man.beginWatch(async (entry, seq) => {
                 const d = entry.type == "plain" ? entry.data : new Uint8Array(decodeBinary(entry.data));
                 let path = entry.path.substring(baseDir.length);
                 if (path.startsWith("/")) {
@@ -294,8 +294,10 @@ export class PeerCouchDB extends Peer {
                     this.sendLog(`${path} change detected`);
                     await this.dispatch(path, docData);
                 }
+                // Only after the change has been handed to the hub: a crash before
+                // this point re-delivers the change on restart instead of losing it.
+                this.advanceSince(seq);
             }, (entry) => {
-                this.setSetting("since", this.man.since);
                 if (entry.path.indexOf(":") !== -1) {
                     if (this.config.includeInternal && entry.path.startsWith("i:")) {
                         const stripped = entry.path.substring(2);
@@ -306,6 +308,19 @@ export class PeerCouchDB extends Peer {
                 return entry.path.startsWith(baseDir);
             });
         }
+    }
+    // Persist the position in the CouchDB changes feed. DirectFileManipulator never
+    // updates `man.since` on its own -- it only hands `seq` to the watch callback --
+    // so persisting `man.since` stored the literal "now" forever. Every restart, and
+    // every reconnect the library performs after a feed error (it resumes from
+    // `man.since`), therefore started at "now" and silently skipped whatever changed
+    // in between. Change handlers run concurrently, so a later seq can be stored
+    // before an earlier one finished; a crash in that window could skip that single
+    // change, which is far narrower than skipping everything since the last start.
+    advanceSince(seq?: string | number): void {
+        if (seq === undefined || seq === null || `${seq}` === "") return;
+        this.man.since = `${seq}`;
+        this.setSetting("since", `${seq}`);
     }
     async dispatch(path: string, data: FileData | false) {
         if (data === false) return;

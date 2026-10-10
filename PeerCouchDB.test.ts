@@ -143,3 +143,33 @@ for (const format of ["text", "binary"] as const) {
         assertEquals(notices.length, 0, "A non-empty update should not be blocked");
     });
 }
+
+function makeSinceSource() {
+    const { peer } = makeSource(async () => {});
+    const settings = new Map<string, string>();
+    peer.setSetting = (key, value) => {
+        settings.set(key, value);
+    };
+    peer.getSetting = (key) => settings.get(key) ?? null;
+    // The manipulator is only built in start(); a stand-in is enough for this unit.
+    (peer as unknown as { man: { since: string } }).man = { since: "now" };
+    return peer;
+}
+
+Deno.test("advanceSince persists the real changes-feed position instead of 'now'", () => {
+    const peer = makeSinceSource();
+    peer.advanceSince("42-g1AAAABxeJzLYWBgYMpgTmHgz8tPSTV0MDQ");
+    assertEquals(peer.man.since, "42-g1AAAABxeJzLYWBgYMpgTmHgz8tPSTV0MDQ", "man.since follows the feed");
+    assertEquals(peer.getSetting("since"), "42-g1AAAABxeJzLYWBgYMpgTmHgz8tPSTV0MDQ", "since is persisted");
+    peer.advanceSince(43);
+    assertEquals(peer.getSetting("since"), "43", "numeric seqs are stored as strings");
+});
+
+Deno.test("advanceSince ignores a missing seq", () => {
+    const peer = makeSinceSource();
+    peer.setSetting("since", "7");
+    peer.advanceSince(undefined);
+    peer.advanceSince("");
+    assertEquals(peer.getSetting("since"), "7", "stored position is kept");
+    assertEquals(peer.man.since, "now", "man.since is kept");
+});
