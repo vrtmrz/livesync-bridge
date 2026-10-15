@@ -38,6 +38,13 @@ $ deno task run
 
 Note: If you want to scan all storage and databases from the beginning, please run with `--reset`.
 
+CouchDB resume positions are saved separately for each peer name, `baseDir`,
+server URL (including any proxy path), and database name. Credentials are not
+part of this identity. Existing checkpoints without a remote identity are not
+reused, so the first connection after upgrading reads remote changes from the
+beginning. Keep the Deno `localStorage` data to retain resume positions across
+restarts.
+
 # Docker Instructions
 
 1. Clone the GitHub Repository

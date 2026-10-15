@@ -4,6 +4,8 @@ import { decodeBinary } from "@vrtmrz/livesync-commonlib/compat/string_and_binar
 import { getDocData } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import { defaultLogger, setGlobalLogFunction } from "octagonal-wheels/common/logger";
 import { PeerCouchDB } from "../../PeerCouchDB.ts";
+import { PeerStorage } from "../../PeerStorage.ts";
+import { Hub } from "../../Hub.ts";
 import type { FileData, PeerCouchDBConf } from "../../types.ts";
 
 const couchDbUrl = Deno.env.get("COUCHDB_URL") ?? "http://127.0.0.1:5989";
@@ -228,5 +230,77 @@ Deno.test("PeerCouchDB allows legacy writes with a whitespace-only ID key", asyn
     } finally {
         await man.close();
         await (await requestDatabase(database, "DELETE")).text();
+    }
+});
+
+
+Deno.test("PeerCouchDB resumes a stopped peer and delivers offline changes to storage", async () => {
+    await waitForCouchDb();
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const database = `livesync_bridge_checkpoint_${suffix}`;
+    const created = await requestDatabase(database, "PUT");
+    assert(created.ok, `Could not create checkpoint database: HTTP ${created.status} ${await created.text()}`);
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-couchdb-checkpoint-" });
+    const config = { ...makeConfig(`checkpoint-${suffix}`, database), passphrase: "", obfuscatePassphrase: "" };
+    const writer = new DirectFileManipulator(config, { fetch: globalThis.fetch });
+    const hub = new Hub({ peers: [] });
+    const delivered: string[] = [];
+    const dispatch: typeof hub.dispatch = async (source, path, data) => {
+        await hub.dispatch(source, path, data);
+        delivered.push(path);
+    };
+    const first = new PeerCouchDB({ ...config }, dispatch);
+    const restarted = new PeerCouchDB({ ...config }, dispatch);
+    const storage = new PeerStorage({
+        type: "storage", name: `checkpoint-storage-${suffix}`, baseDir: tempDir, scanOfflineChanges: false,
+    }, async () => {});
+    const storageSettings = new Map<string, string>();
+    storage.getSetting = (key) => storageSettings.get(key) ?? null;
+    storage.setSetting = (key, value) => { storageSettings.set(key, value); };
+    const waitForFile = async (path: string, content: string) => {
+        const deadline = Date.now() + 15_000;
+        while (Date.now() < deadline) {
+            try {
+                if (await Deno.readTextFile(`${tempDir}/${path}`) === content && delivered.includes(path)) return;
+            } catch (error) {
+                if (!(error instanceof Deno.errors.NotFound)) throw error;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        throw new Error(`The changes feed did not deliver ${path} to storage`);
+    };
+    const info = { ctime: 1_700_000_000_000, mtime: 1_700_000_002_000, size: 6 };
+    try {
+        await writer.ready.promise;
+        const milestone = await fetch(`${couchDbUrl}/${database}/${MILESTONE_DOCID}`, {
+            method: "PUT",
+            headers: { authorization: authHeader, "content-type": "application/json" },
+            body: JSON.stringify({ _id: MILESTONE_DOCID, created: Date.now() }),
+        });
+        assert(milestone.ok, `Could not create the checkpoint milestone: ${await milestone.text()}`);
+        hub.peers = [first, storage];
+        await first.start();
+        assert(await writer.put("before.md", new Blob(["before"], { type: "text/plain" }), info, "plain"), "The first note should be written");
+        await waitForFile("before.md", "before");
+        const saved = first.getSetting("since");
+        assert(saved !== null && saved !== "" && saved !== "now", "The running peer should save a concrete feed position");
+        await first.stop();
+        await first.man.close();
+        delivered.length = 0;
+
+        assert(await writer.put("offline.md", new Blob(["missed"], { type: "text/plain" }), info, "plain"), "A note should be written while the peer is stopped");
+        assertEquals(restarted.getSetting("since"), saved, "The new peer instance should read the persisted position");
+        hub.peers = [restarted, storage];
+        await restarted.start();
+        await waitForFile("offline.md", "missed");
+        assertEquals(delivered.includes("before.md"), false, "The resumed feed should not replay the note before its saved position");
+        assert(restarted.getSetting("since") !== saved, "The offline change should advance the saved position");
+    } finally {
+        await Promise.allSettled([first.stop(), restarted.stop()]);
+        await Promise.allSettled([writer.close(), first.man?.close(), restarted.man?.close()]);
+        localStorage.removeItem(first._getKey("since"));
+        localStorage.removeItem(first._getKey("remote-created"));
+        await (await requestDatabase(database, "DELETE")).text();
+        await Deno.remove(tempDir, { recursive: true });
     }
 });

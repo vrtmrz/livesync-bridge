@@ -44,6 +44,13 @@ export class PeerCouchDB extends Peer {
         // against a possibly-down CouchDB, then discard and rebuild it on the
         // first successful connection.
     }
+    override _getKey(key: string): string {
+        if (key !== "since" && key !== "remote-created") return super._getKey(key);
+        const url = new URL(this.config.url);
+        // Include reverse-proxy paths, but keep credentials out of persisted keys.
+        const endpoint = `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+        return `couchdb-checkpoint:${JSON.stringify([this.config.name, this.config.baseDir, endpoint, this.config.database, key])}`;
+    }
     // (Re)create the underlying DirectFileManipulator. Its constructor starts a
     // one-shot async database initialisation. Recovering from a failed attempt
     // requires a fresh manipulator because its `ready` promise remains settled.
@@ -58,8 +65,8 @@ export class PeerCouchDB extends Peer {
             // Bypass node:http compatibility shims for Deno, Traefik, and long-polling connections.
             fetch: (request, init) => globalThis.fetch(request, init),
         });
-        // Fetch remote since.
-        this.man.since = this.getSetting("since") || "now";
+        // Unbound legacy checkpoints are not reused; read this remote from the beginning.
+        this.man.since = this.getSetting("since") ?? "";
         if (prev) void prev.close().catch(() => {});
     }
     async delete(pathSrc: string): Promise<boolean> {
@@ -272,6 +279,8 @@ export class PeerCouchDB extends Peer {
             }
             if (!w) {
                 this.normalLog(`Remote database looks like empty. fetch from the first.`);
+                this.man.since = "";
+                this.setSetting("since", "");
                 this.setSetting("remote-created", "0");
                 // Connected fine; there's just nothing to watch yet. Mark it so health
                 // counts this as syncing rather than a stuck "not watching" state.
@@ -281,12 +290,13 @@ export class PeerCouchDB extends Peer {
             const created = w.created;
             if (this.getSetting("remote-created") !== `${created}`) {
                 this.man.since = "";
+                this.setSetting("since", "");
                 this.normalLog(`Remote database looks like rebuilt. fetch from the first again.`);
                 this.setSetting("remote-created", `${created}`);
             } else {
                 this.normalLog(`Watch starting from ${this.man.since}`);
             }
-            this.man.beginWatch(async (entry) => {
+            this.man.beginWatch(async (entry, seq) => {
                 const d = entry.type == "plain" ? entry.data : new Uint8Array(decodeBinary(entry.data));
                 let path = entry.path.substring(baseDir.length);
                 if (path.startsWith("/")) {
@@ -303,8 +313,9 @@ export class PeerCouchDB extends Peer {
                     this.sendLog(`${path} change detected`);
                     await this.dispatch(path, docData);
                 }
+                // Save this callback's position after dispatch has returned.
+                this.advanceSince(seq);
             }, (entry) => {
-                this.setSetting("since", this.man.since);
                 if (entry.path.indexOf(":") !== -1) {
                     if (this.config.includeInternal && entry.path.startsWith("i:")) {
                         const stripped = entry.path.substring(2);
@@ -315,6 +326,15 @@ export class PeerCouchDB extends Peer {
                 return entry.path.startsWith(baseDir);
             });
         }
+    }
+    // Commonlib passes seq to the callback without updating man.since. Keep both
+    // the reconnect position and the peer's saved position after dispatch.
+    // Concurrent callbacks can still finish out of order, and earlier pending or
+    // failed changes are not guaranteed to be replayed by this checkpoint alone.
+    advanceSince(seq?: string | number): void {
+        if (seq === undefined || seq === null || `${seq}` === "") return;
+        this.man.since = `${seq}`;
+        this.setSetting("since", `${seq}`);
     }
     async dispatch(path: string, data: FileData | false) {
         if (data === false) return;
