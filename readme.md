@@ -136,6 +136,7 @@ The configuration file consists of the following structure.
       "minimumChunkSize": 20,
       "passphrase": "passphrase", // E2EE passphrase, if you do not enabled, leave it blank.
       "obfuscatePassphrase": "passphrase", // Path obfuscation passphrase. Leave blank to disable it; this may differ from passphrase.
+      "idDerivationKey": "sls-id-v1:...", // ID key of the vault, if it uses one (see below). Omit it otherwise.
       "baseDir": "blog/", // Sharing folder
       "includeInternal": [".claude/**"], // Opt-in glob patterns for internal/hidden files (see caution below). Omit to keep the default of skipping them.
       "useRemoteTweaks":true // Overwrite customChunkSize or minimumChunkSize, and check configuration matches
@@ -166,11 +167,32 @@ The configuration file consists of the following structure.
         // $filename and $mode have been set also in environment variables.
       },
       "scanOfflineChanges": true,
+      "ignore": ["**/.git/**", "node_modules/**"], // Glob patterns which are never synchronised. Omit to synchronise everything.
       "useChokidar":false, // We are using `Deno.watch` now, if you have trouble in Linux, please enable this.
     }
   ]
 }
 ```
+
+## Vaults with an ID key
+
+Recent versions of Self-hosted LiveSync derive chunk IDs and obfuscated document IDs from a separate ID key. New vaults with E2EE get a random ID key by default. The bridge needs the same key, or the plugin cannot read the files the bridge writes. It then reports that not all files could be synchronised.
+
+Copy the key on any device with **Show current recovery code** in the plugin settings, and set it as `idDerivationKey`:
+
+```jsonc
+{
+  "type": "couchdb",
+  "name": "test1",
+  // ...
+  "passphrase": "passphrase",
+  "obfuscatePassphrase": "passphrase",
+  "idDerivationKey": "sls-id-v1:0123...cdef", // The recovery code, or the 64-character hex key on its own
+  "useRemoteTweaks": true
+}
+```
+
+With a key configured, the bridge uses ID derivation version 1 unless `idDerivationVersion` says otherwise. Keep the key private, like the passphrase.
 
 ## Synchronising internal/hidden files
 
@@ -192,6 +214,41 @@ A document is included when its de-prefixed path matches any one of the patterns
 
 > [!CAUTION]
 > This synchronises files that are normally hidden and internal. Such folders often hold tool configuration that can contain machine-specific paths, local settings, or secrets. Only include patterns you genuinely intend to share, and review what they match before enabling. The option is opt-in: leave it out to keep the default behaviour, where all internal/hidden files are skipped.
+
+## Excluding paths from a storage peer
+
+By default a storage peer synchronises every file below its `baseDir`. The
+optional `ignore` field on a storage peer excludes paths from that. It takes an
+array of [minimatch](https://github.com/isaacs/minimatch) glob patterns which
+are matched against the path relative to `baseDir`:
+
+```jsonc
+{
+  "type": "storage",
+  "name": "storage-test1",
+  "baseDir": "./vault/",
+  "ignore": ["**/.git/**", "node_modules/**", "**/*.tmp"]
+}
+```
+
+A path is excluded when it, or any directory containing it, matches any one of
+the patterns. Patterns are matched with the `dot` option, so leading-dot folders
+such as `.git/` are matched as expected. A pattern ending in `/**` also covers
+the directory itself, so `**/.git/**` excludes `.git` as well as everything
+inside it. Likewise, a pattern which matches a directory's name excludes
+everything below that directory: `private` excludes `private/note.md`, and
+`**/*.tmp` excludes the contents of a directory named `cache.tmp`.
+
+Excluded directories are pruned while scanning: they are not descended into, and
+nothing inside them is inspected or read. This matters for `scanOfflineChanges`,
+because a repository such as `.git/` can hold tens of thousands of files which
+would otherwise all be examined at every start. Excluded paths are also skipped
+for live additions, changes and deletions.
+
+Note that `ignore` only stops a storage peer from *sending* its own changes.
+Incoming changes from other peers are still accepted: a file which another peer
+sends is still written, and a deletion which another peer sends is still
+applied, even at an excluded path.
 
 ## Realistic example
 

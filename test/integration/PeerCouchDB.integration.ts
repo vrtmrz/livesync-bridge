@@ -1,4 +1,7 @@
-import type { FilePathWithPrefix } from "@vrtmrz/livesync-commonlib/compat/common/types";
+import { DirectFileManipulator } from "@vrtmrz/livesync-commonlib";
+import { MILESTONE_DOCID, TweakValuesTemplate, type FilePathWithPrefix } from "@vrtmrz/livesync-commonlib/compat/common/types";
+import { decodeBinary } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/convert";
+import { getDocData } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import { defaultLogger, setGlobalLogFunction } from "octagonal-wheels/common/logger";
 import { PeerCouchDB } from "../../PeerCouchDB.ts";
 import type { FileData, PeerCouchDBConf } from "../../types.ts";
@@ -114,5 +117,116 @@ Deno.test("PeerCouchDB exchanges files with distinct content and path passphrase
         await Promise.allSettled([peerA.man?.close(), peerB.man?.close()]);
         setGlobalLogFunction(defaultLogger);
         await requestDatabase(database, "DELETE");
+    }
+});
+
+Deno.test("PeerCouchDB uses a recovery code to read and write an existing ID-v1 vault", async () => {
+    await waitForCouchDb();
+
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const database = `livesync_bridge_id_v1_${suffix}`;
+    const created = await requestDatabase(database, "PUT");
+    assert(created.ok, `Could not create integration database: HTTP ${created.status} ${await created.text()}`);
+
+    const idDerivationKey = "0123456789abcdef".repeat(4);
+    const reference = new DirectFileManipulator({
+        ...makeConfig(`reference-${suffix}`, database),
+        idDerivationKey,
+        idDerivationVersion: 1,
+        encryptInternalMetadata: true,
+    }, { fetch: globalThis.fetch });
+    const peer = new PeerCouchDB({
+        ...makeConfig(`integration-id-v1-${suffix}`, database),
+        idDerivationKey: ` sls-id-v1:${idDerivationKey} `,
+        useRemoteTweaks: true,
+    }, async () => {});
+    const settings = new Map<string, string>();
+    peer.getSetting = (key) => settings.get(key) ?? null;
+    peer.setSetting = (key, value) => { settings.set(key, value); };
+
+    try {
+        await reference.ready.promise;
+        const info = { ctime: 1_700_000_000_000, mtime: 1_700_000_000_000, size: 4 };
+        assert(await reference.put("existing.md", new Blob(["seed"], { type: "text/plain" }), info, "plain"),
+            "The reference writer should seed a note before the bridge starts");
+
+        const milestone = await fetch(`${couchDbUrl}/${database}/${MILESTONE_DOCID}`, {
+            method: "PUT",
+            headers: { authorization: authHeader, "content-type": "application/json" },
+            body: JSON.stringify({
+                _id: MILESTONE_DOCID,
+                created: 12345,
+                tweak_values: {
+                    PREFERRED: {
+                        ...TweakValuesTemplate,
+                        encrypt: true,
+                        usePathObfuscation: true,
+                        idDerivationVersion: 1,
+                        encryptInternalMetadata: true,
+                    },
+                },
+            }),
+        });
+        assert(milestone.ok, `Could not store remote tweaks: HTTP ${milestone.status} ${await milestone.text()}`);
+
+        await peer.start();
+        assertEquals(peer.config.encryptInternalMetadata, true, "The bridge should apply the remote metadata encryption setting");
+        const seed = await peer.get("existing.md" as FilePathWithPrefix);
+        assert(seed !== false, "The recovery code should allow the bridge to find the existing note");
+        assertEquals(seed.data.join(""), "seed", "The bridge should read the existing content");
+
+        for (const path of ["new.md", "i:settings.json", "drawing.excalidraw"]) {
+            const data = path.endsWith(".excalidraw") ? new TextEncoder().encode("file") : ["file"];
+            assert(await peer.put(path, { ...info, data }), `The bridge should write ${path}`);
+            const read = await reference.get(path as FilePathWithPrefix);
+            assert(read !== false, `The reference reader should find ${path} at its ID-v1 document ID`);
+            const content = read.type === "newnote"
+                ? new TextDecoder().decode(decodeBinary(read.data))
+                : getDocData(read.data);
+            assertEquals(content, "file", `The reference reader should recover the content of ${path}`);
+
+            const id = await reference.path2id(path as FilePathWithPrefix);
+            const response = await fetch(`${couchDbUrl}/${database}/${encodeURIComponent(id)}`, {
+                headers: { authorization: authHeader },
+            });
+            const raw = await response.json();
+            assert(response.ok, `The raw document for ${path} should exist`);
+            assert(typeof raw.path === "string" && raw.path.startsWith("/\\:"), `The stored metadata for ${path} should be encrypted`);
+            assertEquals(raw.size, 0, `The stored size for ${path} should be concealed`);
+        }
+    } finally {
+        await peer.stop();
+        await Promise.allSettled([reference.close(), peer.man?.close()]);
+        await (await requestDatabase(database, "DELETE")).text();
+    }
+});
+
+Deno.test("PeerCouchDB allows legacy writes with a whitespace-only ID key", async () => {
+    await waitForCouchDb();
+
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const database = `livesync_bridge_blank_id_${suffix}`;
+    const created = await requestDatabase(database, "PUT");
+    assert(created.ok, `Could not create integration database: HTTP ${created.status} ${await created.text()}`);
+
+    const peer = new PeerCouchDB({
+        ...makeConfig(`integration-blank-id-${suffix}`, database),
+        idDerivationKey: " \t\n",
+    }, async () => {});
+    const man = new DirectFileManipulator(peer.config, { fetch: globalThis.fetch });
+    try {
+        await man.ready.promise;
+        const path = "legacy.md" as FilePathWithPrefix;
+        assert(await man.put(path, new Blob(["legacy"], { type: "text/plain" }), {
+            ctime: 1_700_000_000_000,
+            mtime: 1_700_000_000_000,
+            size: 6,
+        }, "plain"), "An omitted ID key should allow a legacy write");
+        const read = await man.get(path);
+        assert(read !== false, "The legacy document should be readable");
+        assertEquals(getDocData(read.data), "legacy", "The legacy document should retain its content");
+    } finally {
+        await man.close();
+        await (await requestDatabase(database, "DELETE")).text();
     }
 });

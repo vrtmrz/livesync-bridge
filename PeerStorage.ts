@@ -6,7 +6,7 @@ import { format as posixFormat, parse as posixParse } from "@std/path/posix";
 import { scheduleOnceIfDuplicated } from "octagonal-wheels/concurrency/lock";
 import { DispatchFun, Peer, PeerHealth } from "./Peer.ts";
 import chokidar from "chokidar";
-import { walk } from "fs/walk";
+import { minimatch } from "minimatch";
 
 import { scheduleTask } from "octagonal-wheels/concurrency/task";
 import {
@@ -16,14 +16,66 @@ import {
     LOG_LEVEL_VERBOSE,
 } from "octagonal-wheels/common/logger";
 
+// Ignore patterns are matched with minimatch, the same matcher the CouchDB peer uses
+// for `includeInternal`. `dot` is needed because the directories which are worth
+// ignoring at all are usually dot-directories, such as `.git`.
+const IGNORE_MATCH_OPTIONS = { dot: true } as const;
+
 export class PeerStorage extends Peer {
     declare config: PeerStorageConf;
     // The platform's path separator; a field so tests can simulate Windows on any OS.
     pathSeparator: string = SEPARATOR;
+    // Obsidian's Vault supplies per-file delete events when a folder is removed, and
+    // Self-hosted LiveSync ignores folder events. Deno.watchFs may report only the
+    // removed parent, so retain file paths to emulate the missing child events.
+    // The children cannot be enumerated from disk after their folder has gone.
+    private knownFiles = new Set<string>();
+    private readyDenoWatcher?: Deno.FsWatcher;
 
 
     constructor(conf: PeerStorageConf, dispatcher: DispatchFun) {
         super(conf, dispatcher);
+    }
+
+    private ignorePatterns?: string[];
+
+    // The configured patterns, plus the bare directory form of every `dir/**` pattern.
+    // `**/.git/**` matches everything inside `.git` but not `.git` itself, and the
+    // directory itself is exactly what has to be recognised to stay out of the tree.
+    // As a consequence a trailing `/**` also covers the entry with that name.
+    private getIgnorePatterns(): string[] {
+        if (!this.ignorePatterns) {
+            const configured = this.config.ignore ?? [];
+            const directories = configured
+                .filter((pattern) => pattern.endsWith("/**"))
+                .map((pattern) => pattern.slice(0, -"/**".length));
+            this.ignorePatterns = [...configured, ...directories];
+        }
+        return this.ignorePatterns;
+    }
+
+    // Whether a peer-relative POSIX path is excluded from synchronisation.
+    // A path is also excluded when any of its ancestor directories is: the scans
+    // prune an ignored directory, so live events for its descendants have to be
+    // dropped as well, even when a pattern such as `private` or `*.tmp` only
+    // matches the directory itself.
+    isIgnored(path: string): boolean {
+        if (!path) return false;
+        const patterns = this.getIgnorePatterns();
+        if (patterns.length === 0) return false;
+        const segments = path.split("/");
+        for (let depth = 1; depth <= segments.length; depth++) {
+            const candidate = segments.slice(0, depth).join("/");
+            if (patterns.some((pattern) => minimatch(candidate, pattern, IGNORE_MATCH_OPTIONS))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Peer-relative POSIX path of an absolute path as the watchers report it.
+    toRelativePath(pathSrc: string) {
+        return this.toPosixPath(relative(this.toStoragePath(this.toLocalPath(".")), pathSrc));
     }
 
     async delete(pathSrc: string): Promise<boolean> {
@@ -45,6 +97,7 @@ export class PeerStorage extends Peer {
             Logger(ex, LOG_LEVEL_VERBOSE);
             return false;
         }
+        this.knownFiles.delete(path);
         this.runScript(path, true);
         return true;
     }
@@ -199,6 +252,11 @@ export class PeerStorage extends Peer {
         const path = this.toPosixPath(relative(lP, pathSrc));
         if (this.isOutsideBaseDir(path)) return;
 
+        if (this.isIgnored(path)) {
+            this.debugLog(`${path} ignored`);
+            return;
+        }
+
         const data = await this.get(path);
 
         if (data === false) return;
@@ -220,12 +278,19 @@ export class PeerStorage extends Peer {
         const lP = this.toStoragePath(this.toLocalPath("."));
         const path = this.toPosixPath(relative(lP, pathSrc));
         if (this.isOutsideBaseDir(path)) return;
+        if (this.isIgnored(path)) {
+            this.debugLog(`${path} ignored`);
+            return;
+        }
         await scheduleOnceIfDuplicated(pathSrc, async () => {
             await delay(250);
+            // A real or emulated deletion can become stale while it waits behind a write.
+            if (!await this.isMissing(pathSrc)) return;
             if (!await this.isRepeating(path, false)) {
                 this.sendLog(`${path} delete detected`);
                 await this.dispatchToHub(this, this.toGlobalPath(path), false);
             }
+            this.knownFiles.delete(resolve(pathSrc));
         });
 
     }
@@ -269,6 +334,7 @@ export class PeerStorage extends Peer {
         if (!stat.isFile) {
             return false;
         }
+        if (!this.config.useChokidar) this.knownFiles.add(path);
         const fileStat = `${stat.mtime?.getTime() ?? 0}-${stat.size}`;
         this.setSetting(key, fileStat);
     }
@@ -293,24 +359,74 @@ export class PeerStorage extends Peer {
     }
     watcherDeno?: Deno.FsWatcher;
 
+    private async isMissing(path: string): Promise<boolean> {
+        try {
+            await Deno.stat(path);
+            return false;
+        } catch (ex) {
+            if (ex instanceof Deno.errors.NotFound) return true;
+            // Permission and I/O errors do not establish that the file has gone.
+            this.normalLog(`Deletion verification failed: ${path}`, LOG_LEVEL_NOTICE);
+            Logger(ex, LOG_LEVEL_VERBOSE);
+            return false;
+        }
+    }
+
     processFile(event: Deno.FsEvent) {
-        for (const path of event.paths) {
+        for (const eventPath of event.paths) {
+            const path = resolve(eventPath);
+            const relativePath = this.toRelativePath(path);
+            if (this.isOutsideBaseDir(relativePath)) continue;
+            // Filter before scheduling the task, which stats the path.
+            if (this.isIgnored(relativePath)) {
+                this.debugLog(`${relativePath} ignored`);
+                continue;
+            }
             const key = `${event.kind}-${path}`;
-            // const key = path;
             scheduleTask(key, 100, async () => {
-                const existence = await Deno.stat(path).catch(() => null);
-                if (existence) {
-                    if (existence.isFile) {
-                        await this.dispatch(path);
+                let existence: Deno.FileInfo | undefined;
+                try {
+                    existence = await Deno.stat(path);
+                } catch (ex) {
+                    if (!(ex instanceof Deno.errors.NotFound)) {
+                        this.normalLog(`Deletion verification failed: ${path}`, LOG_LEVEL_NOTICE);
+                        Logger(ex, LOG_LEVEL_VERBOSE);
+                        return;
                     }
-                } else {
-                    await this.dispatchDeleted(path);
+                }
+                if (existence?.isFile) {
+                    await this.dispatch(path);
+                } else if (!existence || (existence.isDirectory && event.kind === "remove")) {
+                    // Emulate only file deletions: the parent path is a watcher hint, not
+                    // a document to delete. A recreated parent can still have missing children.
+                    const prefix = path.endsWith(SEPARATOR) ? path : `${path}${SEPARATOR}`;
+                    const candidates = [...this.knownFiles].filter((file) => file === path || file.startsWith(prefix));
+                    await Promise.all(candidates.map((file) => this.dispatchDeleted(file)));
                 }
             });
         }
     }
 
-
+    // Prune ignored trees before inventorying or inspecting their contents, even
+    // when offline uploads are disabled and only the deletion inventory is needed.
+    private async *listFiles(directory: string, prefix = ""): AsyncGenerator<string> {
+        try {
+            for await (const entry of Deno.readDir(directory)) {
+                const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+                if (this.isIgnored(relativePath)) {
+                    this.debugLog(`${relativePath} ignored`);
+                    continue;
+                }
+                const path = resolve(directory, entry.name);
+                if (entry.isFile) yield path;
+                else if (entry.isDirectory) yield* this.listFiles(path, relativePath);
+            }
+        } catch (ex) {
+            // A directory can disappear while the inventory is being read. Continue
+            // with its siblings; queued watcher events reconcile any known children.
+            if (!(ex instanceof Deno.errors.NotFound)) throw ex;
+        }
+    }
 
     async startDenoFsWatch(): Promise<void> {
         if (this.watcherDeno) {
@@ -324,29 +440,36 @@ export class PeerStorage extends Peer {
             }
         }
         const lP = this.toStoragePath(this.toLocalPath("."));
-        this.normalLog(`Scan offline changes: ${this.config.scanOfflineChanges ? "Enabled, now starting..." : "Disabled"}`);
-        if (this.config.scanOfflineChanges) {
-            for await (const entry of walk(lP)) {
-                if (entry.isFile) {
-                    const ePath = this.toPosixPath(relative(this.toLocalPath("."), entry.path));
-                    if (await this.isChanged(ePath)) {
-                        this.debugLog(`Offline changes detected: ${ePath}`);
-                        await this.dispatch(entry.path);
-                    }
-                }
-            }
-        }
-        const watcher = Deno.watchFs(lP,
-            {
-                recursive: true,
-            });
+        const watcher = Deno.watchFs(lP, { recursive: true });
         this.watcherDeno = watcher;
 
         try {
+            this.normalLog(`Scan offline changes: ${this.config.scanOfflineChanges ? "Enabled, now starting..." : "Disabled"}`);
+            // Watch before taking the inventory so removals during the scan are queued.
+            // Even with offline syncing disabled, remember existing files without sending
+            // their contents. Unchanged files must also be known for later parent removals.
+            for await (const path of this.listFiles(lP)) {
+                if (this.watcherDeno !== watcher) return;
+                this.knownFiles.add(path);
+                if (this.config.scanOfflineChanges) {
+                    const ePath = this.toPosixPath(relative(lP, path));
+                    try {
+                        if (await this.isChanged(ePath)) {
+                            this.debugLog(`Offline changes detected: ${ePath}`);
+                            await this.dispatch(path);
+                        }
+                    } catch (ex) {
+                        if (!(ex instanceof Deno.errors.NotFound)) throw ex;
+                    }
+                }
+            }
+            if (this.watcherDeno !== watcher) return;
+            this.readyDenoWatcher = watcher;
             for await (const event of watcher) {
                 this.processFile(event);
             }
         } finally {
+            if (this.readyDenoWatcher === watcher) this.readyDenoWatcher = undefined;
             if (this.watcherDeno === watcher) {
                 this.watcherDeno = undefined;
             }
@@ -376,6 +499,10 @@ export class PeerStorage extends Peer {
         const watcher = chokidar.watch(lP,
             {
                 ignoreInitial: !this.config.scanOfflineChanges,
+                // Prunes ignored directories from the watch itself, so their contents
+                // are never stat()ed or watched. dispatch() filters as well, for the
+                // events which chokidar reports before this can apply.
+                ignored: (path: string) => this.isIgnored(this.toRelativePath(path)),
                 awaitWriteFinish: {
                     stabilityThreshold: 500,
                 },
@@ -390,6 +517,10 @@ export class PeerStorage extends Peer {
         });
         watcher.on("change", async (path) => {
             const ePath = this.toPosixPath(relative(this.toLocalPath("."), path));
+            if (this.isIgnored(ePath)) {
+                this.debugLog(`${ePath} ignored`);
+                return;
+            }
             if (!await this.isChanged(ePath)) {
                 // this.debugLog(`Not changed: ${ePath}`);
             } else {
@@ -399,6 +530,10 @@ export class PeerStorage extends Peer {
         })
         watcher.on("add", async (path) => {
             const ePath = this.toPosixPath(relative(this.toLocalPath("."), path));
+            if (this.isIgnored(ePath)) {
+                this.debugLog(`${ePath} ignored`);
+                return;
+            }
             if (!await this.isChanged(ePath)) {
                 // this.debugLog(`Not changed: ${ePath}`);
             } else {
@@ -408,6 +543,10 @@ export class PeerStorage extends Peer {
         })
         watcher.on("unlink", async (path) => {
             const ePath = this.toPosixPath(relative(this.toLocalPath("."), path));
+            if (this.isIgnored(ePath)) {
+                this.debugLog(`${ePath} ignored`);
+                return;
+            }
             // Confirm that the path is absent before propagating a deletion.
             // Permission and I/O errors do not establish that the file is gone.
             try {
@@ -430,6 +569,7 @@ export class PeerStorage extends Peer {
         this.watcher = undefined;
         const watcherDeno = this.watcherDeno;
         this.watcherDeno = undefined;
+        this.readyDenoWatcher = undefined;
         if (watcherDeno) {
             try {
                 watcherDeno.close();
@@ -441,7 +581,7 @@ export class PeerStorage extends Peer {
         await this.closeChokidarWatcher(watcher);
     }
     override health(): PeerHealth {
-        const ok = !!(this.watcherDeno || this.watcher);
+        const ok = !!(this.watcher || (this.watcherDeno && this.readyDenoWatcher === this.watcherDeno));
         // No remote backend (backendUp always true). A storage peer still doing its
         // initial offline scan is "starting", not yet healthy, so the base restart
         // logic won't flag it — only a watcher that dies after being healthy counts.

@@ -5,16 +5,16 @@
         "lint": "deno lint",
         "run": "deno run -A main.ts",
         "test": "deno test -A",
-        "test:integration": "deno test -A test/integration/PeerCouchDB.integration.ts"
+        "test:integration": "deno test -A test/integration/PeerCouchDB.integration.ts test/integration/PeerStorage.e2e.ts",
+        "test:e2e": "deno test -A test/integration/PeerStorage.e2e.ts"
     },
     "imports": {
-        "@vrtmrz/livesync-commonlib": "npm:@vrtmrz/livesync-commonlib@0.1.19",
-        "@vrtmrz/livesync-commonlib/compat/common/types": "npm:@vrtmrz/livesync-commonlib@0.1.19/compat/common/types",
-        "@vrtmrz/livesync-commonlib/compat/common/utils": "npm:@vrtmrz/livesync-commonlib@0.1.19/compat/common/utils",
-        "@vrtmrz/livesync-commonlib/compat/string_and_binary/convert": "npm:@vrtmrz/livesync-commonlib@0.1.19/compat/string_and_binary/convert",
-        "@vrtmrz/livesync-commonlib/compat/string_and_binary/path": "npm:@vrtmrz/livesync-commonlib@0.1.19/compat/string_and_binary/path",
+        "@vrtmrz/livesync-commonlib": "npm:@vrtmrz/livesync-commonlib@0.1.39",
+        "@vrtmrz/livesync-commonlib/compat/common/types": "npm:@vrtmrz/livesync-commonlib@0.1.39/compat/common/types",
+        "@vrtmrz/livesync-commonlib/compat/common/utils": "npm:@vrtmrz/livesync-commonlib@0.1.39/compat/common/utils",
+        "@vrtmrz/livesync-commonlib/compat/string_and_binary/convert": "npm:@vrtmrz/livesync-commonlib@0.1.39/compat/string_and_binary/convert",
+        "@vrtmrz/livesync-commonlib/compat/string_and_binary/path": "npm:@vrtmrz/livesync-commonlib@0.1.39/compat/string_and_binary/path",
         "@std/cli": "jsr:@std/cli@^1.0.17",
-        "fs/walk": "jsr:@std/fs@^1.0.17/",
         "@std/path": "jsr:@std/path@^1.0.9",
         "@types/pouchdb": "npm:@types/pouchdb@^6.4.2",
         "octagonal-wheels": "npm:octagonal-wheels@^0.1.53",

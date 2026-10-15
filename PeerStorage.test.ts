@@ -25,6 +25,72 @@ function makePeer(baseDir: string, useChokidar = false) {
     return new PeerStorage(config, async () => {});
 }
 
+// A peer which records everything it hands to the hub, so a test can tell an
+// ignored path (never dispatched) from a synchronised one.
+function makeRecordingPeer(baseDir: string, extra: Partial<PeerStorageConf> = {}) {
+    const dispatched: { path: string, data: FileData | false }[] = [];
+    const config: PeerStorageConf = {
+        type: "storage",
+        name: `test-peer-${crypto.randomUUID()}`,
+        baseDir,
+        scanOfflineChanges: false,
+        useChokidar: false,
+        ...extra,
+    };
+    const peer = new PeerStorage(config, (_source, path, data) => {
+        dispatched.push({ path, data });
+        return Promise.resolve();
+    });
+    return { peer, dispatched };
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// The dispatch path debounces and delays, so the assertions have to wait for it.
+async function waitFor(condition: () => boolean, message: string, timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs;
+    while (!condition()) {
+        if (Date.now() > deadline) throw new Error(`Timed out while waiting: ${message}`);
+        await sleep(10);
+    }
+}
+
+// Records every path which is stat()ed, to prove that ignored trees are pruned
+// before anything touches the files in them.
+function recordStatPaths() {
+    const originalStat = Deno.stat;
+    const paths: string[] = [];
+    Deno.stat = ((path: string | URL, ...rest: unknown[]) => {
+        paths.push((typeof path === "string" ? path : path.pathname).replaceAll("\\", "/"));
+        return (originalStat as (...args: unknown[]) => Promise<Deno.FileInfo>)(path, ...rest);
+    }) as typeof Deno.stat;
+    return {
+        paths,
+        restore() {
+            Deno.stat = originalStat;
+        },
+    };
+}
+
+async function makeVaultWithIgnorableTrees(tempDir: string) {
+    await Deno.mkdir(join(tempDir, ".git", "objects", "aa"), { recursive: true });
+    await Deno.writeTextFile(join(tempDir, ".git", "objects", "aa", "deadbeef"), "object");
+    await Deno.writeTextFile(join(tempDir, ".git", "config"), "[core]");
+    await Deno.mkdir(join(tempDir, "node_modules", "pkg"), { recursive: true });
+    await Deno.writeTextFile(join(tempDir, "node_modules", "pkg", "index.js"), "module");
+    await Deno.mkdir(join(tempDir, "notes"), { recursive: true });
+    await Deno.writeTextFile(join(tempDir, "notes", "keep.md"), "keep");
+    // Not ignored by `**/.git/**`: guards against the pattern over-matching.
+    await Deno.writeTextFile(join(tempDir, ".gitignore"), "node_modules");
+}
+
+const IGNORE_PATTERNS = ["**/.git/**", "node_modules/**"];
+
+function assertNothingTouchedIn(statPaths: string[], message: string) {
+    const touched = statPaths.filter((path) => path.includes("/.git/") || path.includes("/node_modules/"));
+    assertEquals(touched.join(","), "", message);
+}
+
 class ControlledDenoWatcher implements AsyncIterator<Deno.FsEvent>, AsyncIterable<Deno.FsEvent> {
     private readonly result: Promise<IteratorResult<Deno.FsEvent>>;
     private resolveResult!: (result: IteratorResult<Deno.FsEvent>) => void;
@@ -78,6 +144,7 @@ Deno.test("PeerStorage Deno watcher clears health after normal end and error", a
         const endedPeer = makePeer(tempDir);
         const ended = endedPeer.startDenoFsWatch();
         assertEquals(watchers.length, 1, "Deno watcher should be created");
+        await waitForDenoWatch(endedPeer);
         assert(endedPeer.health().ok, "Deno watcher should be healthy while running");
 
         watchers[0].finish();
@@ -87,6 +154,7 @@ Deno.test("PeerStorage Deno watcher clears health after normal end and error", a
         const failedPeer = makePeer(tempDir);
         const failed = failedPeer.startDenoFsWatch().catch(() => undefined);
         assertEquals(watchers.length, 2, "second Deno watcher should be created");
+        await waitForDenoWatch(failedPeer);
         watchers[1].fail(new Error("controlled watcher failure"));
         await failed;
         assert(!failedPeer.health().ok, "Deno watcher error should make health false");
@@ -112,6 +180,7 @@ Deno.test("PeerStorage Deno watcher does not clear a newer concurrent watcher", 
         const second = peer.startDenoFsWatch().catch(() => undefined);
         assertEquals(watchers.length, 2, "concurrent start should create two Deno watchers");
 
+        await waitForDenoWatch(peer);
         watchers[0].finish();
         await first;
         assertEquals(peer.watcherDeno, watchers[1], "old watcher completion must not clear the newer watcher");
@@ -626,5 +695,744 @@ Deno.test("PeerStorage ignores sibling events with a similar base directory pref
         assertEquals(dispatched.length, 0, "A similarly named sibling directory should stay outside baseDir");
     } finally {
         await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+for (const childEvent of [false, true]) {
+    Deno.test(`PeerStorage Deno directory removal deletes synced children with ${childEvent ? "a child event" : "only a parent event"}`, async () => {
+        const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-directory-removal-" });
+        const directory = join(tempDir, "removed");
+        const child = join(directory, "note.md");
+        const { peer } = makeWritePeer(`${tempDir}/`);
+        const dispatched: { path: string; data: FileData | false }[] = [];
+        peer.dispatchToHub = (_source, path, data) => {
+            dispatched.push({ path, data });
+            return Promise.resolve();
+        };
+        try {
+            await Deno.mkdir(directory);
+            await Deno.writeTextFile(child, "already synced");
+            await peer.dispatch(child);
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            assertEquals(dispatched.length, 1, "The child should be synced before removing its directory");
+            assertEquals(dispatched[0].path, "removed/note.md", "The child should use its vault path");
+            assert(dispatched[0].data !== false, "The initial sync should carry the file contents");
+            dispatched.length = 0;
+
+            await Deno.remove(directory, { recursive: true });
+            peer.processFile({ kind: "remove", paths: childEvent ? [child, directory] : [directory] });
+            await new Promise((resolve) => setTimeout(resolve, 600));
+
+            const childDeletions = dispatched.filter((entry) => entry.path === "removed/note.md" && entry.data === false);
+            assertEquals(childDeletions.length, 1, "The synced child deletion should reach the hub exactly once");
+            assertEquals(dispatched.length, 1, "Only file deletions should reach the hub");
+        } finally {
+            await Deno.remove(tempDir, { recursive: true });
+        }
+    });
+}
+
+
+type DenoRemovalFixture = {
+    peer: PeerStorage;
+    baseDir: string;
+    directory: string;
+    children: string[];
+    dispatched: { path: string; data: FileData | false }[];
+    notices: string[];
+};
+
+async function settleDenoEvents() {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+}
+
+async function waitForDenoWatch(peer: PeerStorage) {
+    const deadline = Date.now() + 5000;
+    while (!peer.health().ok && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert(peer.health().ok, "The Deno watcher should finish its initial inventory");
+}
+
+async function withDenoRemovalFixture(
+    check: (fixture: DenoRemovalFixture) => Promise<void>,
+    inventory: "dispatch" | "put" | "startup" = "dispatch",
+    scanOfflineChanges = false,
+) {
+    const baseDir = await Deno.makeTempDir({ prefix: "peer-storage-deno-removal-" });
+    const directory = join(baseDir, "removed");
+    const children = [join(directory, "note.md"), join(directory, "deep", "other.md")];
+    const { peer, notices } = makeWritePeer(`${baseDir}/`);
+    const dispatched: DenoRemovalFixture["dispatched"] = [];
+    peer.dispatchToHub = (_source, path, data) => {
+        dispatched.push({ path, data });
+        return Promise.resolve();
+    };
+    const originalWatchFs = Deno.watchFs;
+    let watching: Promise<void> | undefined;
+    try {
+        await Deno.mkdir(join(directory, "deep"), { recursive: true });
+        await Deno.mkdir(join(baseDir, "removed-other"));
+        const files = [...children, join(baseDir, "removed-other", "stay.md")];
+        for (const file of files) {
+            const vaultPath = peer.toPosixPath(file.slice(baseDir.length + 1));
+            if (inventory === "put") {
+                assert(await peer.put(vaultPath, textFileData("synced")), "An incoming file should be written");
+            } else {
+                await Deno.writeTextFile(file, "synced");
+                if (inventory === "dispatch") {
+                    await peer.dispatch(file);
+                } else {
+                    // Seed offline scan state directly: writeFileStat would also seed the new inventory.
+                    const stat = await Deno.stat(file);
+                    peer.setSetting(`file-stat-${peer.toLocalPath(vaultPath)}`, `${stat.mtime?.getTime() ?? 0}-${stat.size}`);
+                }
+            }
+        }
+        if (inventory === "startup") {
+            Deno.watchFs = (() => new ControlledDenoWatcher() as unknown as Deno.FsWatcher) as typeof Deno.watchFs;
+            peer.config.scanOfflineChanges = scanOfflineChanges;
+            watching = peer.startDenoFsWatch();
+            await waitForDenoWatch(peer);
+            await settleDenoEvents();
+            assertEquals(dispatched.length, 0, "Unchanged startup files should not be synchronised again");
+        } else {
+            await settleDenoEvents();
+        }
+        dispatched.length = 0;
+        await check({ peer, baseDir, directory, children, dispatched, notices });
+    } finally {
+        Deno.watchFs = originalWatchFs;
+        await peer.stop();
+        await watching;
+        await Deno.remove(baseDir, { recursive: true });
+    }
+}
+
+function assertChildDeletions(fixture: DenoRemovalFixture, expected = "removed/deep/other.md,removed/note.md") {
+    assert(fixture.dispatched.every((entry) => entry.data === false), "Every notification should be a deletion");
+    assertEquals(fixture.dispatched.map((entry) => entry.path).sort().join(","), expected,
+        "Only missing child files should be deleted, each exactly once");
+}
+
+for (const inventory of ["dispatch", "put", "startup"] as const) {
+    for (const scanOfflineChanges of inventory === "startup" ? [false, true] : [false]) {
+        Deno.test(`PeerStorage Deno parent removal recovers nested files from ${inventory}, offline scan ${scanOfflineChanges}`, async () => {
+            await withDenoRemovalFixture(async (fixture) => {
+                await Deno.remove(fixture.directory, { recursive: true });
+                fixture.peer.processFile({ kind: "remove", paths: [fixture.directory] });
+                await settleDenoEvents();
+                assertChildDeletions(fixture);
+                assertEquals(await Deno.readTextFile(join(fixture.baseDir, "removed-other", "stay.md")), "synced",
+                    "A similarly named sibling should remain intact");
+            }, inventory, scanOfflineChanges);
+        });
+    }
+}
+
+Deno.test("PeerStorage Deno parent and repeated child events emit file deletions once", async () => {
+    await withDenoRemovalFixture(async (fixture) => {
+        await Deno.remove(fixture.directory, { recursive: true });
+        const paths = [fixture.directory, ...fixture.children, fixture.directory];
+        fixture.peer.processFile({ kind: "remove", paths });
+        fixture.peer.processFile({ kind: "modify", paths });
+        await settleDenoEvents();
+        assertChildDeletions(fixture);
+        fixture.peer.processFile({ kind: "remove", paths });
+        await settleDenoEvents();
+        assertChildDeletions(fixture);
+    });
+});
+
+Deno.test("PeerStorage Deno deletion rechecks a child recreated during the dispatch delay", async () => {
+    await withDenoRemovalFixture(async (fixture) => {
+        await Deno.remove(fixture.directory, { recursive: true });
+        fixture.peer.processFile({ kind: "remove", paths: [fixture.directory] });
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        await Deno.mkdir(fixture.directory);
+        await Deno.writeTextFile(fixture.children[0], "recreated");
+        await settleDenoEvents();
+        assertChildDeletions(fixture, "removed/deep/other.md");
+        assertEquals(await Deno.readTextFile(fixture.children[0]), "recreated", "The recreated file should remain intact");
+    });
+});
+
+Deno.test("PeerStorage Deno parent removal checks children even if the parent was recreated", async () => {
+    await withDenoRemovalFixture(async (fixture) => {
+        await Deno.remove(fixture.directory, { recursive: true });
+        await Deno.mkdir(fixture.directory);
+        await Deno.writeTextFile(fixture.children[0], "recreated");
+        fixture.peer.processFile({ kind: "remove", paths: [fixture.directory] });
+        await settleDenoEvents();
+        assertChildDeletions(fixture, "removed/deep/other.md");
+    });
+});
+
+for (const target of ["parent", "child"] as const) {
+    for (const [name, error] of [
+        ["permission", new Deno.errors.PermissionDenied("controlled permission failure")],
+        ["I/O", new Error("controlled I/O failure")],
+    ] as const) {
+        Deno.test(`PeerStorage Deno deletion preserves inventory after a ${target} stat ${name} error`, async () => {
+            await withDenoRemovalFixture(async (fixture) => {
+                await Deno.remove(fixture.directory, { recursive: true });
+                const originalStat = Deno.stat;
+                const failedPath = target === "parent" ? fixture.directory : fixture.children[0];
+                try {
+                    Deno.stat = ((path: string | URL) => path === failedPath
+                        ? Promise.reject(error) : originalStat(path)) as typeof Deno.stat;
+                    fixture.peer.processFile({ kind: "remove", paths: [fixture.directory] });
+                    await settleDenoEvents();
+                    assertChildDeletions(fixture, target === "parent" ? "" : "removed/deep/other.md");
+                    assert(fixture.notices.some((notice) => notice.includes(failedPath)), "The failed check should be logged");
+                } finally {
+                    Deno.stat = originalStat;
+                }
+                fixture.peer.processFile({ kind: "remove", paths: [fixture.directory] });
+                await settleDenoEvents();
+                assertChildDeletions(fixture);
+            });
+        });
+    }
+}
+
+Deno.test("PeerStorage Deno ancestor events outside baseDir cannot delete known children", async () => {
+    await withDenoRemovalFixture(async (fixture) => {
+        await Deno.remove(fixture.directory, { recursive: true });
+        fixture.peer.processFile({ kind: "remove", paths: [join(fixture.baseDir, "..")] });
+        await settleDenoEvents();
+        assertChildDeletions(fixture, "");
+        fixture.peer.processFile({ kind: "remove", paths: [fixture.directory] });
+        await settleDenoEvents();
+        assertChildDeletions(fixture);
+    });
+});
+
+Deno.test("PeerStorage Deno ignores removed empty folders and unknown paths", async () => {
+    await withDenoRemovalFixture(async (fixture) => {
+        const empty = join(fixture.baseDir, "empty");
+        await Deno.mkdir(empty);
+        fixture.peer.processFile({ kind: "create", paths: [empty] });
+        await settleDenoEvents();
+        await Deno.remove(empty);
+        fixture.peer.processFile({ kind: "remove", paths: [empty, join(fixture.baseDir, "unknown")] });
+        await settleDenoEvents();
+        assertChildDeletions(fixture, "");
+    });
+});
+
+Deno.test("PeerStorage Deno real watcher propagates recursive removal as file deletions", async () => {
+    const baseDir = await Deno.makeTempDir({ prefix: "peer-storage-native-removal-" });
+    const directory = join(baseDir, "removed");
+    const { peer } = makeWritePeer(`${baseDir}/`);
+    const deleted: string[] = [];
+    peer.dispatchToHub = (_source, path, data) => {
+        assertEquals(data, false, "The inventory should produce only file deletions");
+        deleted.push(path);
+        return Promise.resolve();
+    };
+    let watching: Promise<void> | undefined;
+    try {
+        await Deno.mkdir(join(directory, "deep"), { recursive: true });
+        await Deno.writeTextFile(join(directory, "note.md"), "synced");
+        await Deno.writeTextFile(join(directory, "deep", "other.md"), "synced");
+        watching = peer.startDenoFsWatch();
+        await waitForDenoWatch(peer);
+        await Deno.remove(directory, { recursive: true });
+        const deadline = Date.now() + 5000;
+        while (deleted.length < 2 && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        await settleDenoEvents();
+        assertEquals(deleted.sort().join(","), "removed/deep/other.md,removed/note.md",
+            "The native watcher should delete each child exactly once and skip directories");
+    } finally {
+        await peer.stop();
+        await watching;
+        await Deno.remove(baseDir, { recursive: true });
+    }
+});
+
+Deno.test("PeerStorage Deno watcher stops during the initial inventory", async () => {
+    const baseDir = await Deno.makeTempDir({ prefix: "peer-storage-inventory-stop-" });
+    const peer = makePeer(baseDir);
+    const originalWatchFs = Deno.watchFs;
+    const originalReadDir = Deno.readDir;
+    let scanned!: () => void;
+    let release!: () => void;
+    const scanning = new Promise<void>((resolve) => { scanned = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    Deno.watchFs = (() => new ControlledDenoWatcher() as unknown as Deno.FsWatcher) as typeof Deno.watchFs;
+    Deno.readDir = (async function* (path) {
+        if (path === baseDir) {
+            scanned();
+            await released;
+        }
+        yield* originalReadDir(path);
+    }) as typeof Deno.readDir;
+    let watching: Promise<void> | undefined;
+    try {
+        watching = peer.startDenoFsWatch();
+        await scanning;
+        assert(!peer.health().ok, "An unfinished inventory should remain in the starting state");
+        await peer.stop();
+        release();
+        await watching;
+        assert(!peer.health().ok, "Finishing the scan must not restart a stopped watcher");
+        assertEquals(peer.watcherDeno, undefined, "The stopped watcher should remain cleared");
+    } finally {
+        release();
+        Deno.readDir = originalReadDir;
+        Deno.watchFs = originalWatchFs;
+        await peer.stop();
+        await watching;
+        await Deno.remove(baseDir, { recursive: true });
+    }
+});
+
+for (const scanOfflineChanges of [false, true]) {
+    Deno.test(`PeerStorage Deno inventory continues after a subdirectory disappears, offline scan ${scanOfflineChanges}`, async () => {
+        const baseDir = await Deno.makeTempDir({ prefix: "peer-storage-vanishing-inventory-" });
+        const vanishing = join(baseDir, "vanishing");
+        const remaining = join(baseDir, "remaining");
+        const { peer } = makeWritePeer(`${baseDir}/`);
+        peer.config.scanOfflineChanges = scanOfflineChanges;
+        const dispatched: { path: string; data: FileData | false }[] = [];
+        peer.dispatchToHub = (_source, path, data) => {
+            dispatched.push({ path, data });
+            return Promise.resolve();
+        };
+        const originalWatchFs = Deno.watchFs;
+        const originalReadDir = Deno.readDir;
+        Deno.watchFs = (() => new ControlledDenoWatcher() as unknown as Deno.FsWatcher) as typeof Deno.watchFs;
+        let removed = false;
+        Deno.readDir = (async function* (path) {
+            if (path === vanishing) {
+                await Deno.remove(vanishing, { recursive: true });
+                removed = true;
+            }
+            yield* originalReadDir(path);
+        }) as typeof Deno.readDir;
+        let watching: Promise<void> | undefined;
+        let startError: unknown;
+        try {
+            await Deno.mkdir(vanishing);
+            await Deno.mkdir(remaining);
+            await Deno.writeTextFile(join(remaining, "note.md"), "synced");
+            watching = peer.startDenoFsWatch().catch((error) => { startError = error; });
+            const deadline = Date.now() + 5000;
+            while (!peer.health().ok && startError === undefined && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            assert(removed, "The subdirectory should disappear during the inventory");
+            assert(startError === undefined, `A vanished subdirectory must not abort the watcher: ${startError}`);
+            assert(peer.health().ok, "The remaining inventory should finish and the watcher should become healthy");
+            await settleDenoEvents();
+            dispatched.length = 0;
+            await Deno.remove(remaining, { recursive: true });
+            peer.processFile({ kind: "remove", paths: [remaining] });
+            await settleDenoEvents();
+            assertEquals(dispatched.length, 1, "The remaining file should be known despite the interrupted subtree");
+            assertEquals(dispatched[0].path, "remaining/note.md", "The remaining file deletion should reach the hub");
+            assertEquals(dispatched[0].data, false, "The remaining file should carry a deletion marker");
+        } finally {
+            Deno.readDir = originalReadDir;
+            Deno.watchFs = originalWatchFs;
+            await peer.stop();
+            await watching;
+            await Deno.remove(baseDir, { recursive: true });
+        }
+    });
+}
+
+Deno.test("PeerStorage offline scan never enters an ignored directory", async () => {
+    const originalWatchFs = Deno.watchFs;
+    const watchers: ControlledDenoWatcher[] = [];
+    Deno.watchFs = (() => {
+        const watcher = new ControlledDenoWatcher();
+        watchers.push(watcher);
+        return watcher as unknown as Deno.FsWatcher;
+    }) as typeof Deno.watchFs;
+
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-test-" });
+    await makeVaultWithIgnorableTrees(tempDir);
+    const stats = recordStatPaths();
+    try {
+        const { peer, dispatched } = makeRecordingPeer(tempDir, {
+            scanOfflineChanges: true,
+            ignore: IGNORE_PATTERNS,
+        });
+
+        const running = peer.startDenoFsWatch();
+        await waitFor(() => watchers.length === 1, "the offline scan should complete and start a watcher");
+        await waitFor(() => dispatched.length === 2, "both files outside the ignored trees should be dispatched");
+
+        watchers[0].finish();
+        await running;
+
+        const paths = dispatched.map((entry) => entry.path).sort().join(",");
+        assertEquals(paths, ".gitignore,notes/keep.md", "only files outside the ignored trees should be dispatched");
+        assertNothingTouchedIn(stats.paths, "the offline scan must not stat anything inside an ignored tree");
+    } finally {
+        stats.restore();
+        Deno.watchFs = originalWatchFs;
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+Deno.test("PeerStorage drops live change events inside an ignored directory", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-test-" });
+    await makeVaultWithIgnorableTrees(tempDir);
+    const stats = recordStatPaths();
+    try {
+        const { peer, dispatched } = makeRecordingPeer(tempDir, { ignore: IGNORE_PATTERNS });
+
+        peer.processFile({
+            kind: "modify",
+            paths: [
+                join(tempDir, ".git", "config"),
+                join(tempDir, "node_modules", "pkg", "index.js"),
+                join(tempDir, "notes", "keep.md"),
+            ],
+        } as Deno.FsEvent);
+
+        await waitFor(() => dispatched.length === 1, "the changed file outside the ignored trees should be dispatched");
+        // Long enough for a leaked ignored event to have arrived as well.
+        await sleep(500);
+
+        assertEquals(dispatched.length, 1, "changes inside an ignored tree must not be dispatched");
+        assertEquals(dispatched[0].path, "notes/keep.md", "the dispatched change should be the non-ignored file");
+        assertNothingTouchedIn(stats.paths, "a live change event inside an ignored tree must not stat the path");
+    } finally {
+        stats.restore();
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+Deno.test("PeerStorage drops live delete events inside an ignored directory", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-test-" });
+    await makeVaultWithIgnorableTrees(tempDir);
+    const stats = recordStatPaths();
+    try {
+        const { peer, dispatched } = makeRecordingPeer(tempDir, { ignore: IGNORE_PATTERNS });
+        await peer.writeFileStat("notes/keep.md");
+        await Deno.remove(join(tempDir, ".git", "config"));
+        await Deno.remove(join(tempDir, "notes", "keep.md"));
+
+        peer.processFile({
+            kind: "remove",
+            paths: [join(tempDir, ".git", "config"), join(tempDir, "notes", "keep.md")],
+        } as Deno.FsEvent);
+
+        await waitFor(() => dispatched.length === 1, "the deleted file outside the ignored trees should be dispatched");
+        await sleep(500);
+
+        assertEquals(dispatched.length, 1, "deletions inside an ignored tree must not be dispatched");
+        assertEquals(dispatched[0].path, "notes/keep.md", "the dispatched deletion should be the non-ignored file");
+        assertEquals(dispatched[0].data, false, "a deletion should be dispatched as `false`");
+        assertNothingTouchedIn(stats.paths, "a live delete event inside an ignored tree must not stat the path");
+    } finally {
+        stats.restore();
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+Deno.test("PeerStorage Chokidar watch prunes ignored paths and drops their events", async () => {
+    const originalWatch = chokidar.watch;
+    const watchers: ControlledChokidarWatcher[] = [];
+    const options: chokidar.WatchOptions[] = [];
+    chokidar.watch = ((_path: string, watchOptions: chokidar.WatchOptions) => {
+        options.push(watchOptions);
+        const watcher = new ControlledChokidarWatcher();
+        watchers.push(watcher);
+        return watcher as unknown as ReturnType<typeof chokidar.watch>;
+    }) as typeof chokidar.watch;
+
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-test-" });
+    await makeVaultWithIgnorableTrees(tempDir);
+    const stats = recordStatPaths();
+    try {
+        const { peer, dispatched } = makeRecordingPeer(tempDir, {
+            useChokidar: true,
+            ignore: IGNORE_PATTERNS,
+        });
+        await peer.start();
+        assertEquals(watchers.length, 1, "Chokidar watcher should be created");
+
+        // The watch itself has to prune, so an ignored tree is never watched.
+        const ignored = options[0].ignored as (path: string) => boolean;
+        assert(ignored(join(tempDir, ".git")), "the ignored directory itself should be pruned from the watch");
+        assert(ignored(join(tempDir, ".git", "config")), "files in an ignored directory should be pruned from the watch");
+        assert(!ignored(join(tempDir, "notes", "keep.md")), "a file outside the ignored trees should stay watched");
+
+        // And the handlers filter as well, for events reported before that applies.
+        watchers[0].emit("add", join(tempDir, ".git", "config"));
+        watchers[0].emit("change", join(tempDir, "node_modules", "pkg", "index.js"));
+        watchers[0].emit("unlink", join(tempDir, ".git", "objects", "aa", "deadbeef"));
+        watchers[0].emit("change", join(tempDir, "notes", "keep.md"));
+
+        await waitFor(() => dispatched.length === 1, "the changed file outside the ignored trees should be dispatched");
+        await sleep(500);
+
+        assertEquals(dispatched.length, 1, "Chokidar events inside an ignored tree must not be dispatched");
+        assertEquals(dispatched[0].path, "notes/keep.md", "the dispatched change should be the non-ignored file");
+        assertNothingTouchedIn(stats.paths, "Chokidar events inside an ignored tree must not stat the path");
+
+        const stopping = peer.stop();
+        watchers[0].finishClose();
+        await stopping;
+    } finally {
+        stats.restore();
+        chokidar.watch = originalWatch;
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+Deno.test("PeerStorage ignore patterns match paths, directories and nothing when unset", () => {
+    const withoutPatterns = makePeer("/vault");
+    assert(!withoutPatterns.isIgnored(".git/config"), "without patterns nothing should be ignored");
+
+    const { peer } = makeRecordingPeer("/vault", { ignore: IGNORE_PATTERNS });
+    assert(peer.isIgnored(".git/config"), "a file in an ignored directory should be ignored");
+    assert(peer.isIgnored("notes/sub/.git/config"), "a nested ignored directory should be ignored");
+    assert(peer.isIgnored(".git"), "a trailing /** should also cover the directory itself");
+    assert(peer.isIgnored("notes/sub/.git"), "a nested ignored directory itself should be ignored");
+    assert(peer.isIgnored("node_modules/pkg/index.js"), "a file in an ignored top-level directory should be ignored");
+    assert(!peer.isIgnored(".gitignore"), "a pattern must not match a similarly named file");
+    assert(!peer.isIgnored("notes/keep.md"), "an unrelated file should not be ignored");
+    assert(!peer.isIgnored("notes/node_modules/pkg/index.js"), "a top-level-only pattern should not match nested paths");
+    assert(!peer.isIgnored(""), "the peer root itself should never be ignored");
+});
+
+// Records every path which is read, alongside recordStatPaths(), to prove that
+// descendants of an ignored directory are dropped before their contents are read.
+function recordReadPaths() {
+    const originalReadTextFile = Deno.readTextFile;
+    const originalReadFile = Deno.readFile;
+    const paths: string[] = [];
+    const record = (path: string | URL) => paths.push((typeof path === "string" ? path : path.pathname).replaceAll("\\", "/"));
+    Deno.readTextFile = ((path: string | URL, ...rest: unknown[]) => {
+        record(path);
+        return (originalReadTextFile as (...args: unknown[]) => Promise<string>)(path, ...rest);
+    }) as typeof Deno.readTextFile;
+    Deno.readFile = ((path: string | URL, ...rest: unknown[]) => {
+        record(path);
+        return (originalReadFile as (...args: unknown[]) => Promise<Uint8Array>)(path, ...rest);
+    }) as typeof Deno.readFile;
+    return {
+        paths,
+        restore() {
+            Deno.readTextFile = originalReadTextFile;
+            Deno.readFile = originalReadFile;
+        },
+    };
+}
+
+// Patterns which match only a directory's own name, not the paths below it.
+const DIRECTORY_NAME_PATTERNS = ["private", "*.tmp"];
+
+async function makeVaultWithDirectoryNameMatches(tempDir: string) {
+    await Deno.mkdir(join(tempDir, "private", "nested"), { recursive: true });
+    await Deno.writeTextFile(join(tempDir, "private", "note.md"), "secret");
+    await Deno.writeTextFile(join(tempDir, "private", "nested", "deep.md"), "secret");
+    await Deno.mkdir(join(tempDir, "cache.tmp"), { recursive: true });
+    await Deno.writeTextFile(join(tempDir, "cache.tmp", "entry.md"), "cached");
+    await Deno.mkdir(join(tempDir, "notes"), { recursive: true });
+    await Deno.writeTextFile(join(tempDir, "notes", "keep.md"), "keep");
+}
+
+function assertNothingTouchedBelowMatchedDirectories(paths: string[], message: string) {
+    const touched = paths.filter((path) => path.includes("/private/") || path.includes("/cache.tmp/"));
+    assertEquals(touched.join(","), "", message);
+}
+
+Deno.test("PeerStorage ignores descendants of a directory matched only by its name", () => {
+    const { peer } = makeRecordingPeer("/vault", { ignore: DIRECTORY_NAME_PATTERNS });
+    assert(peer.isIgnored("private"), "the matched directory itself should be ignored");
+    assert(peer.isIgnored("private/note.md"), "a file in a matched directory should be ignored");
+    assert(peer.isIgnored("private/nested/deep.md"), "a deeper descendant of a matched directory should be ignored");
+    assert(peer.isIgnored("cache.tmp/entry.md"), "a file in a directory matched by a wildcard should be ignored");
+    assert(!peer.isIgnored("notes/keep.md"), "an unrelated file should not be ignored");
+    assert(!peer.isIgnored("notes/private.md"), "a file merely named like the pattern should not be ignored");
+});
+
+Deno.test("PeerStorage offline scan and live events agree on descendants of an ignored directory", async () => {
+    const originalWatchFs = Deno.watchFs;
+    const watchers: ControlledDenoWatcher[] = [];
+    Deno.watchFs = (() => {
+        const watcher = new ControlledDenoWatcher();
+        watchers.push(watcher);
+        return watcher as unknown as Deno.FsWatcher;
+    }) as typeof Deno.watchFs;
+
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-test-" });
+    await makeVaultWithDirectoryNameMatches(tempDir);
+    const stats = recordStatPaths();
+    const reads = recordReadPaths();
+    try {
+        const { peer, dispatched } = makeRecordingPeer(tempDir, {
+            scanOfflineChanges: true,
+            ignore: DIRECTORY_NAME_PATTERNS,
+        });
+
+        const running = peer.startDenoFsWatch();
+        await waitFor(() => watchers.length === 1, "the offline scan should complete and start a watcher");
+        await waitFor(() => dispatched.length === 1, "the file outside the ignored directories should be dispatched");
+        assertEquals(dispatched[0].path, "notes/keep.md", "the offline scan should skip the ignored directories");
+
+        // The same files reported by the live watcher must be dropped as well.
+        peer.processFile({
+            kind: "modify",
+            paths: [
+                join(tempDir, "private", "note.md"),
+                join(tempDir, "private", "nested", "deep.md"),
+                join(tempDir, "cache.tmp", "entry.md"),
+            ],
+        } as Deno.FsEvent);
+        await sleep(500);
+
+        watchers[0].finish();
+        await running;
+
+        assertEquals(dispatched.length, 1, "live changes below an ignored directory must not be dispatched");
+        assertNothingTouchedBelowMatchedDirectories(stats.paths, "descendants of an ignored directory must not be stat()ed");
+        assertNothingTouchedBelowMatchedDirectories(reads.paths, "descendants of an ignored directory must not be read");
+    } finally {
+        reads.restore();
+        stats.restore();
+        Deno.watchFs = originalWatchFs;
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+Deno.test("PeerStorage drops live delete events below a directory matched only by its name", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-test-" });
+    await makeVaultWithDirectoryNameMatches(tempDir);
+    const stats = recordStatPaths();
+    const reads = recordReadPaths();
+    try {
+        const { peer, dispatched } = makeRecordingPeer(tempDir, { ignore: DIRECTORY_NAME_PATTERNS });
+        await peer.writeFileStat("notes/keep.md");
+        await Deno.remove(join(tempDir, "private", "note.md"));
+        await Deno.remove(join(tempDir, "cache.tmp", "entry.md"));
+        await Deno.remove(join(tempDir, "notes", "keep.md"));
+
+        peer.processFile({
+            kind: "remove",
+            paths: [
+                join(tempDir, "private", "note.md"),
+                join(tempDir, "cache.tmp", "entry.md"),
+                join(tempDir, "notes", "keep.md"),
+            ],
+        } as Deno.FsEvent);
+
+        await waitFor(() => dispatched.length === 1, "the deleted file outside the ignored directories should be dispatched");
+        await sleep(500);
+
+        assertEquals(dispatched.length, 1, "deletions below an ignored directory must not be dispatched");
+        assertEquals(dispatched[0].path, "notes/keep.md", "the dispatched deletion should be the non-ignored file");
+        assertEquals(dispatched[0].data, false, "a deletion should be dispatched as `false`");
+        assertNothingTouchedBelowMatchedDirectories(stats.paths, "deleted descendants of an ignored directory must not be stat()ed");
+        assertNothingTouchedBelowMatchedDirectories(reads.paths, "deleted descendants of an ignored directory must not be read");
+    } finally {
+        reads.restore();
+        stats.restore();
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+for (const scanOfflineChanges of [false, true]) {
+    Deno.test(`PeerStorage ignored startup inventory prunes directories, offline scan ${scanOfflineChanges}`, async () => {
+        const baseDir = await Deno.makeTempDir({ prefix: "peer-storage-ignored-inventory-" });
+        await makeVaultWithDirectoryNameMatches(baseDir);
+        const { peer, dispatched } = makeRecordingPeer(baseDir, {
+            ignore: DIRECTORY_NAME_PATTERNS,
+            scanOfflineChanges,
+        });
+        const originalWatchFs = Deno.watchFs;
+        const originalReadDir = Deno.readDir;
+        const directories: string[] = [];
+        const stats = recordStatPaths();
+        const reads = recordReadPaths();
+        Deno.watchFs = (() => new ControlledDenoWatcher() as unknown as Deno.FsWatcher) as typeof Deno.watchFs;
+        Deno.readDir = (async function* (path) {
+            if (typeof path === "string") directories.push(peer.toRelativePath(path));
+            yield* originalReadDir(path);
+        }) as typeof Deno.readDir;
+        let watching: Promise<void> | undefined;
+        try {
+            watching = peer.startDenoFsWatch();
+            await waitForDenoWatch(peer);
+            if (scanOfflineChanges) {
+                await waitFor(() => dispatched.length === 1, "the non-ignored startup file should be sent");
+                assertEquals(dispatched[0].path, "notes/keep.md", "Only the non-ignored file should be sent");
+            }
+            assert(!directories.some((path) => path === "private" || path === "cache.tmp"),
+                "The startup inventory must not enter ignored directories");
+            assertNothingTouchedBelowMatchedDirectories(stats.paths, "The inventory must not stat ignored descendants");
+            assertNothingTouchedBelowMatchedDirectories(reads.paths, "The inventory must not read ignored descendants");
+            assertEquals(dispatched.length, scanOfflineChanges ? 1 : 0,
+                "Disabling offline syncing should still inventory files without sending their contents");
+
+            dispatched.length = 0;
+            await Deno.remove(join(baseDir, "notes"), { recursive: true });
+            peer.processFile({ kind: "remove", paths: [join(baseDir, "notes")] });
+            await settleDenoEvents();
+            assertEquals(dispatched.length, 1, "The inventory should retain the non-ignored child for parent removal");
+            assertEquals(dispatched[0].path, "notes/keep.md", "The missing child should use its vault path");
+            assertEquals(dispatched[0].data, false, "The missing child should carry a deletion marker");
+        } finally {
+            Deno.readDir = originalReadDir;
+            Deno.watchFs = originalWatchFs;
+            reads.restore();
+            stats.restore();
+            await peer.stop();
+            await watching;
+            await Deno.remove(baseDir, { recursive: true });
+        }
+    });
+}
+
+Deno.test("PeerStorage parent removal excludes ignored children received from another peer", async () => {
+    const baseDir = await Deno.makeTempDir({ prefix: "peer-storage-ignored-parent-removal-" });
+    const directory = join(baseDir, "removed");
+    const { peer, dispatched } = makeRecordingPeer(baseDir, { ignore: ["**/private"] });
+    const originalWatchFs = Deno.watchFs;
+    let watching: Promise<void> | undefined;
+    try {
+        await Deno.mkdir(join(directory, "private"), { recursive: true });
+        await Deno.writeTextFile(join(directory, "keep.md"), "already synced");
+        await Deno.writeTextFile(join(directory, "private", "local.md"), "excluded");
+        Deno.watchFs = (() => new ControlledDenoWatcher() as unknown as Deno.FsWatcher) as typeof Deno.watchFs;
+        watching = peer.startDenoFsWatch();
+        await waitForDenoWatch(peer);
+        assert(await peer.put("removed/private/incoming.md", textFileData("received")),
+            "Incoming writes at ignored paths should still be accepted");
+        assertEquals(await Deno.readTextFile(join(directory, "private", "incoming.md")), "received",
+            "The incoming contents should be written at the ignored path");
+        assert(await peer.put("removed/private/deleted.md", textFileData("received")),
+            "An ignored file should be available for an incoming deletion");
+        assert(await peer.delete("removed/private/deleted.md"), "Incoming deletions at ignored paths should still be accepted");
+
+        const stats = recordStatPaths();
+        const reads = recordReadPaths();
+        try {
+            await Deno.remove(directory, { recursive: true });
+            peer.processFile({ kind: "remove", paths: [directory] });
+            await settleDenoEvents();
+            assertEquals(dispatched.length, 1, "Only the non-ignored child deletion should be sent");
+            assertEquals(dispatched[0].path, "removed/keep.md", "The non-ignored child should be deleted");
+            assertEquals(dispatched[0].data, false, "The child should carry a deletion marker");
+            assertNothingTouchedBelowMatchedDirectories(stats.paths, "Parent removal must not stat ignored children");
+            assertNothingTouchedBelowMatchedDirectories(reads.paths, "Parent removal must not read ignored children");
+        } finally {
+            reads.restore();
+            stats.restore();
+        }
+    } finally {
+        Deno.watchFs = originalWatchFs;
+        await peer.stop();
+        await watching;
+        await Deno.remove(baseDir, { recursive: true });
     }
 });
