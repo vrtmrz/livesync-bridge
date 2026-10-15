@@ -5,7 +5,8 @@
         "lint": "deno lint",
         "run": "deno run -A main.ts",
         "test": "deno test -A",
-        "test:integration": "deno test -A test/integration/PeerCouchDB.integration.ts"
+        "test:integration": "deno test -A test/integration/PeerCouchDB.integration.ts test/integration/PeerStorage.e2e.ts",
+        "test:e2e": "deno test -A test/integration/PeerStorage.e2e.ts"
     },
     "imports": {
         "@vrtmrz/livesync-commonlib": "npm:@vrtmrz/livesync-commonlib@0.1.19",
