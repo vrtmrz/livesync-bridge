@@ -14,7 +14,7 @@ function assert(condition: unknown, message: string) {
     if (!condition) throw new Error(message);
 }
 
-function makeSource(dispatcher: DispatchFun) {
+function makeSource(dispatcher: DispatchFun, overrides: Partial<PeerCouchDBConf> = {}) {
     const config: PeerCouchDBConf = {
         type: "couchdb",
         name: `test-source-${crypto.randomUUID()}`,
@@ -25,6 +25,7 @@ function makeSource(dispatcher: DispatchFun) {
         password: "",
         passphrase: "",
         obfuscatePassphrase: "",
+        ...overrides,
     };
     const peer = new PeerCouchDB(config, dispatcher);
     const notices: string[] = [];
@@ -33,6 +34,35 @@ function makeSource(dispatcher: DispatchFun) {
     };
     return { peer, notices };
 }
+
+const ID_KEY = "0123456789abcdef".repeat(4);
+
+Deno.test("PeerCouchDB normalises raw ID keys and recovery codes before startup", () => {
+    for (const idDerivationKey of [ID_KEY, ` ${ID_KEY} `, ` sls-id-v1:${ID_KEY} `]) {
+        const { peer } = makeSource(async () => {}, { idDerivationKey });
+        assertEquals(peer.config.idDerivationKey, ID_KEY, "The configured key should be normalised");
+        assertEquals(peer.config.idDerivationVersion, 1, "A configured key should select ID derivation version 1");
+    }
+});
+
+Deno.test("PeerCouchDB treats empty and whitespace-only ID keys as omitted", () => {
+    for (const idDerivationKey of [undefined, "", " \t\n"]) {
+        const { peer } = makeSource(async () => {}, { idDerivationKey });
+        assertEquals(peer.config.idDerivationKey, undefined, "An empty key should be removed from the configuration");
+        assertEquals(peer.config.idDerivationVersion, undefined, "An empty key should leave ID derivation unchanged");
+    }
+});
+
+Deno.test("PeerCouchDB preserves an explicit ID derivation version", () => {
+    for (const idDerivationVersion of [0, 1] as const) {
+        const { peer } = makeSource(async () => {}, {
+            idDerivationKey: `sls-id-v1:${ID_KEY}`,
+            idDerivationVersion,
+        });
+        assertEquals(peer.config.idDerivationKey, ID_KEY, "An explicit version should still allow key normalisation");
+        assertEquals(peer.config.idDerivationVersion, idDerivationVersion, "The configured version should be preserved");
+    }
+});
 
 function makeDestination(baseDir: string) {
     const config: PeerStorageConf = {

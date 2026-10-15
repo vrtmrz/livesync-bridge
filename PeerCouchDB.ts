@@ -34,8 +34,8 @@ export class PeerCouchDB extends Peer {
     constructor(conf: PeerCouchDBConf, dispatcher: DispatchFun) {
         super(conf, dispatcher);
         const idDerivationKey = normaliseIdDerivationKey(this.config.idDerivationKey);
+        this.config.idDerivationKey = idDerivationKey;
         if (idDerivationKey) {
-            this.config.idDerivationKey = idDerivationKey;
             // The manipulator checks remote document IDs before remote tweaks are applied, so a configured key must select version 1 up front
             this.config.idDerivationVersion ??= 1;
         }
