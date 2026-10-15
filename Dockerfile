@@ -1,4 +1,4 @@
-FROM docker.io/denoland/deno:2.6.9
+FROM docker.io/denoland/deno:2.9.7
 
 WORKDIR /app
 RUN chown deno:deno /app

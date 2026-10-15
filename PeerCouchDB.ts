@@ -11,6 +11,7 @@ import { DispatchFun, Peer, PeerHealth } from "./Peer.ts";
 import {
     createBinaryBlob,
     createTextBlob,
+    getDocData,
     isDocContentSame,
     unique,
 } from "@vrtmrz/livesync-commonlib/compat/common/utils";
@@ -308,6 +309,17 @@ export class PeerCouchDB extends Peer {
     }
     async dispatch(path: string, data: FileData | false) {
         if (data === false) return;
+        // Reject inconsistent empty data before recording repeats or delivering it to peers.
+        // A later valid empty update must still be dispatched.
+        if (data.size > 0 && (data.data instanceof Uint8Array
+            ? data.data.byteLength === 0
+            : getDocData(data.data).length === 0)) {
+            this.normalLog(
+                `Empty update blocked: ${path} (${data.size} bytes reported, 0 bytes received)`,
+                LOG_LEVEL_NOTICE,
+            );
+            return;
+        }
         if (!await this.isRepeating(path, data)) {
             await this.dispatchToHub(this, this.toGlobalPath(path), data);
         }
