@@ -44,6 +44,13 @@ export class PeerCouchDB extends Peer {
         // against a possibly-down CouchDB, then discard and rebuild it on the
         // first successful connection.
     }
+    override _getKey(key: string): string {
+        if (key !== "since" && key !== "remote-created") return super._getKey(key);
+        const url = new URL(this.config.url);
+        // Include reverse-proxy paths, but keep credentials out of persisted keys.
+        const endpoint = `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+        return `couchdb-checkpoint:${JSON.stringify([this.config.name, this.config.baseDir, endpoint, this.config.database, key])}`;
+    }
     // (Re)create the underlying DirectFileManipulator. Its constructor starts a
     // one-shot async database initialisation. Recovering from a failed attempt
     // requires a fresh manipulator because its `ready` promise remains settled.
@@ -58,8 +65,8 @@ export class PeerCouchDB extends Peer {
             // Bypass node:http compatibility shims for Deno, Traefik, and long-polling connections.
             fetch: (request, init) => globalThis.fetch(request, init),
         });
-        // Fetch remote since.
-        this.man.since = this.getSetting("since") || "now";
+        // Unbound legacy checkpoints are not reused; read this remote from the beginning.
+        this.man.since = this.getSetting("since") ?? "";
         if (prev) void prev.close().catch(() => {});
     }
     async delete(pathSrc: string): Promise<boolean> {
@@ -272,6 +279,8 @@ export class PeerCouchDB extends Peer {
             }
             if (!w) {
                 this.normalLog(`Remote database looks like empty. fetch from the first.`);
+                this.man.since = "";
+                this.setSetting("since", "");
                 this.setSetting("remote-created", "0");
                 // Connected fine; there's just nothing to watch yet. Mark it so health
                 // counts this as syncing rather than a stuck "not watching" state.
@@ -281,6 +290,7 @@ export class PeerCouchDB extends Peer {
             const created = w.created;
             if (this.getSetting("remote-created") !== `${created}`) {
                 this.man.since = "";
+                this.setSetting("since", "");
                 this.normalLog(`Remote database looks like rebuilt. fetch from the first again.`);
                 this.setSetting("remote-created", `${created}`);
             } else {
@@ -303,8 +313,7 @@ export class PeerCouchDB extends Peer {
                     this.sendLog(`${path} change detected`);
                     await this.dispatch(path, docData);
                 }
-                // Only after the change has been handed to the hub: a crash before
-                // this point re-delivers the change on restart instead of losing it.
+                // Save this callback's position after dispatch has returned.
                 this.advanceSince(seq);
             }, (entry) => {
                 if (entry.path.indexOf(":") !== -1) {
@@ -318,14 +327,10 @@ export class PeerCouchDB extends Peer {
             });
         }
     }
-    // Persist the position in the CouchDB changes feed. DirectFileManipulator never
-    // updates `man.since` on its own -- it only hands `seq` to the watch callback --
-    // so persisting `man.since` stored the literal "now" forever. Every restart, and
-    // every reconnect the library performs after a feed error (it resumes from
-    // `man.since`), therefore started at "now" and silently skipped whatever changed
-    // in between. Change handlers run concurrently, so a later seq can be stored
-    // before an earlier one finished; a crash in that window could skip that single
-    // change, which is far narrower than skipping everything since the last start.
+    // Commonlib passes seq to the callback without updating man.since. Keep both
+    // the reconnect position and the peer's saved position after dispatch.
+    // Concurrent callbacks can still finish out of order, and earlier pending or
+    // failed changes are not guaranteed to be replayed by this checkpoint alone.
     advanceSince(seq?: string | number): void {
         if (seq === undefined || seq === null || `${seq}` === "") return;
         this.man.since = `${seq}`;
