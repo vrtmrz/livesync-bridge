@@ -16,6 +16,8 @@ export interface PeerStorageConf {
         args: string[]
     }
     useChokidar?: boolean;
+    /** Glob patterns for paths which are never synchronised, e.g. [".git/**"] */
+    ignore?: string[];
 }
 export interface PeerCouchDBConf extends DirectFileManipulatorOptions {
     /** Glob patterns for i:-prefixed (internal) files to sync, e.g. [".claude/**"] */

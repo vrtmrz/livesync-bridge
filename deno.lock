@@ -3,7 +3,6 @@
   "specifiers": {
     "jsr:@std/cli@*": "1.0.17",
     "jsr:@std/cli@^1.0.17": "1.0.17",
-    "jsr:@std/fs@^1.0.17": "1.0.17",
     "jsr:@std/path@*": "1.0.9",
     "jsr:@std/path@^1.0.9": "1.0.9",
     "npm:@types/diff-match-patch@^1.0.36": "1.0.36",
@@ -18,12 +17,6 @@
   "jsr": {
     "@std/cli@1.0.17": {
       "integrity": "e15b9abe629e17be90cc6216327f03a29eae613365f1353837fa749aad29ce7b"
-    },
-    "@std/fs@1.0.17": {
-      "integrity": "1c00c632677c1158988ef7a004cb16137f870aafdb8163b9dce86ec652f3952b",
-      "dependencies": [
-        "jsr:@std/path@^1.0.9"
-      ]
     },
     "@std/path@1.0.9": {
       "integrity": "260a49f11edd3db93dd38350bf9cd1b4d1366afa98e81b86167b4e3dd750129e"
@@ -1115,7 +1108,6 @@
   "workspace": {
     "dependencies": [
       "jsr:@std/cli@^1.0.17",
-      "jsr:@std/fs@^1.0.17",
       "jsr:@std/path@^1.0.9",
       "npm:@types/diff-match-patch@^1.0.36",
       "npm:@types/pouchdb@^6.4.2",

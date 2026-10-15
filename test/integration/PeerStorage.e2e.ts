@@ -65,11 +65,13 @@ for (const parentOnly of [false, true]) {
         const baseDir = await Deno.makeTempDir({ prefix: "bridge-storage-e2e-" });
         const directory = join(baseDir, "removed");
         const children = ["removed/note.md", "removed/deep/other.md"];
+        const ignoredChildren = ["removed/private/local.md"];
         const survivors = ["removed-other/stay.md", "root-control.md"];
         const files = [...children, ...survivors];
         const storageConfig: PeerStorageConf = {
             type: "storage", name: `e2e-storage-${suffix}`, baseDir: `${baseDir}/`,
             scanOfflineChanges: true, useChokidar: false,
+            ignore: ["**/private"],
         };
         const remoteConfig = couchConfig(`e2e-remote-${suffix}`, database);
         const readerConfig = couchConfig(`e2e-reader-${suffix}`, database);
@@ -110,8 +112,9 @@ for (const parentOnly of [false, true]) {
             // Pre-existing files are synced by the real offline scan, avoiding pending
             // creation events when child deletion notifications are deliberately dropped.
             await Deno.mkdir(join(directory, "deep"), { recursive: true });
+            await Deno.mkdir(join(directory, "private"));
             await Deno.mkdir(join(baseDir, "removed-other"));
-            for (const path of files) await Deno.writeTextFile(join(baseDir, path), `Content of ${path}`);
+            for (const path of [...files, ...ignoredChildren]) await Deno.writeTextFile(join(baseDir, path), `Content of ${path}`);
             hub.start();
             await waitFor(() => hub.peers.length === 2 && hub.peers.every((peer) => peer.health().ok),
                 "The storage watcher and CouchDB peer did not become ready");
@@ -123,6 +126,9 @@ for (const parentOnly of [false, true]) {
             await waitFor(async () => (await readDocuments(database, ids)).every((row) => row.doc && !isDeleted(row)),
                 "The storage peer did not upload all source files through the hub");
             const before = await readDocuments(database, ids);
+            const ignoredIds = await Promise.all(ignoredChildren.map((path) => remote.man.path2id(path as FilePathWithPrefix)));
+            assert((await readDocuments(database, ignoredIds)).every((row) => row.error === "not_found"),
+                "Ignored children should not be uploaded during the startup inventory");
             for (const path of files) {
                 const data = await remote.get(path as FilePathWithPrefix);
                 assert(data !== false && Array.isArray(data.data) && data.data.join("") === `Content of ${path}`,
@@ -133,6 +139,8 @@ for (const parentOnly of [false, true]) {
             await Deno.remove(directory, { recursive: true });
             await waitFor(async () => (await readDocuments(database, ids.slice(0, children.length))).every(isDeleted),
                 "Missing child tombstones after recursive directory removal");
+            assert((await readDocuments(database, ignoredIds)).every((row) => row.error === "not_found"),
+                "Parent removal should not create deletion records for ignored children");
             assert(deliveredPaths.includes(directory), "The real watcher should deliver the removed parent path");
             if (parentOnly) {
                 assert(!deliveredPaths.some((path) => path.startsWith(`${directory}${SEPARATOR}`)),
