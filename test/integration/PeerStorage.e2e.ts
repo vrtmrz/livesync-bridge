@@ -1,9 +1,16 @@
 import { join, resolve, SEPARATOR } from "@std/path";
-import type { FilePathWithPrefix } from "@vrtmrz/livesync-commonlib/compat/common/types";
+import {
+    MILESTONE_DOCID,
+    TweakValuesTemplate,
+    type FilePathWithPrefix,
+} from "@vrtmrz/livesync-commonlib/compat/common/types";
 import { Hub } from "../../Hub.ts";
 import { PeerCouchDB } from "../../PeerCouchDB.ts";
 import { PeerStorage } from "../../PeerStorage.ts";
-import type { PeerCouchDBConf, PeerStorageConf } from "../../types.ts";
+import type { FileData, PeerCouchDBConf, PeerStorageConf } from "../../types.ts";
+import { DirectFileManipulator } from "@vrtmrz/livesync-commonlib";
+import { getDocData } from "@vrtmrz/livesync-commonlib/compat/common/utils";
+import { decodeBinary } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/convert";
 
 const couchDbUrl = Deno.env.get("COUCHDB_URL") ?? "http://127.0.0.1:5989";
 const authorization = `Basic ${btoa(`${Deno.env.get("COUCHDB_USERNAME") ?? "admin"}:${Deno.env.get("COUCHDB_PASSWORD") ?? "testpassword"}`)}`;
@@ -193,4 +200,449 @@ for (const parentOnly of [false, true]) {
             await Deno.remove(baseDir, { recursive: true });
         }
     });
+}
+for (const baseDir of ["", "blog/"]) {
+    for (const encryptInternalMetadata of [false, true]) {
+        Deno.test(
+            "Native watcher synchronises selected hidden files | baseDir: " +
+                (baseDir || "empty") + " | encrypted metadata: " + encryptInternalMetadata,
+            async () => {
+                const suffix = crypto.randomUUID().replaceAll("-", "");
+                const database = "livesync_bridge_watcher_" + suffix;
+                const basePath = await Deno.makeTempDir({ prefix: "bridge-watcher-e2e-" });
+                const remoteConfig: PeerCouchDBConf = {
+                    ...couchConfig("watcher-remote-" + suffix, database),
+                    baseDir,
+                    includeInternal: [".claude/**"],
+                    useRemoteTweaks: true,
+                    encryptInternalMetadata,
+                };
+                const storageConfig: PeerStorageConf = {
+                    type: "storage",
+                    name: "watcher-storage-" + suffix,
+                    baseDir: basePath + "/",
+                    scanOfflineChanges: false,
+                    useChokidar: false,
+                };
+                const hub = new Hub({ peers: [remoteConfig, storageConfig] });
+                let writer: DirectFileManipulator | undefined;
+                let databaseCreated = false;
+                let changeFeed: {
+                    on: (event: string, listener: (change: RemoteChange) => void) => unknown;
+                    off?: (event: string, listener: (change: RemoteChange) => void) => unknown;
+                    removeListener?: (event: string, listener: (change: RemoteChange) => void) => unknown;
+                } | undefined;
+                let remoteChangeListener: ((change: RemoteChange) => void) | undefined;
+                const remoteChanges: RemoteChange[] = [];
+                const hubDispatches: Array<{
+                    sourceType: string;
+                    path: string;
+                    data: FileData | false;
+                }> = [];
+                const originalDispatch = hub.dispatch.bind(hub);
+                hub.dispatch = async (source, path, data) => {
+                    await originalDispatch(source, path, data);
+                    hubDispatches.push({ sourceType: source.config.type, path, data });
+                };
+
+                const localHiddenPath = join(basePath, ".claude", "settings.json");
+                const excludedLocalPath = join(basePath, ".obsidian", "app.json");
+                const localNotePath = join(basePath, "note.md");
+                const readStorageFile = async (path: string): Promise<string | false> => {
+                    try {
+                        return await Deno.readTextFile(join(basePath, path));
+                    } catch (error) {
+                        if (error instanceof Deno.errors.NotFound) return false;
+                        throw error;
+                    }
+                };
+                const internalPath = "i:.claude/settings.json" as FilePathWithPrefix;
+                const internalAlias = (baseDir + ".claude/settings.json") as FilePathWithPrefix;
+                const remoteHiddenPath = "i:.claude/remote.json" as FilePathWithPrefix;
+                const remoteHiddenAlias = (baseDir + ".claude/remote.json") as FilePathWithPrefix;
+                const excludedPath = "i:.obsidian/app.json" as FilePathWithPrefix;
+                const excludedAlias = (baseDir + ".obsidian/app.json") as FilePathWithPrefix;
+                const ordinaryPath = (baseDir + "note.md") as FilePathWithPrefix;
+
+                const writeRemote = async (
+                    path: FilePathWithPrefix,
+                    content: string,
+                    type: "plain" | "newnote",
+                ) => {
+                    assert(writer, "The independent CouchDB writer should be ready");
+                    const bytes = new TextEncoder().encode(content);
+                    assert(await writer.put(path, new Blob([bytes]), {
+                        ctime: 1_700_000_000_000,
+                        mtime: Date.now(),
+                        size: bytes.byteLength,
+                    }, type), "The independent writer should write " + path);
+                };
+                const waitForRemoteChange = async (
+                    after: number,
+                    path: FilePathWithPrefix,
+                    id: string,
+                ) => {
+                    await waitFor(
+                        () => remoteChanges.slice(after).some((change) =>
+                            change.id === id || change._id === id ||
+                            change.doc?._id === id || change.path === path ||
+                            change.doc?.path === path
+                        ),
+                        "CouchDB should emit the excluded change for " + path,
+                    );
+                };
+                const waitForStorageText = async (path: string, expected: string | false) => {
+                    await waitFor(
+                        async () => await readStorageFile(path) === expected &&
+                            hubDispatches.some((event) => event.sourceType === "couchdb" && event.path === path &&
+                                (expected === false ? event.data === false : event.data !== false &&
+                                    (event.data.data instanceof Uint8Array
+                                        ? new TextDecoder().decode(event.data.data)
+                                        : event.data.data.join("")) === expected)),
+                        "The real watcher pipeline should finish putting " + path + " on disk as " + expected,
+                    );
+                };
+                const waitForWriterText = async (
+                    path: FilePathWithPrefix,
+                    expected: string | false,
+                ) => {
+                    await waitFor(
+                        async () => await readWriterText(writer!, path) === expected,
+                        "The real storage watcher should write " + path + " to CouchDB as " + expected,
+                    );
+                };
+                const writeRemoteControl = async (content: string) => {
+                    await writeRemote(ordinaryPath, content, "plain");
+                    await waitForStorageText("note.md", content);
+                };
+                const writeLocalControl = async (content: string) => {
+                    await Deno.writeTextFile(localNotePath, content);
+                    await waitForWriterText(ordinaryPath, content);
+                };
+                const assertNoAlias = async (path: FilePathWithPrefix, message: string) => {
+                    const id = await writer!.path2id(path);
+                    const [row] = await readDocuments(database, [id]);
+                    assert(row.error === "not_found", message);
+                };
+                const assertRawMetadataMode = async (id: string) => {
+                    const response = await request(database, "/" + encodeURIComponent(id));
+                    assert(response.ok, "The selected internal Metadata should exist in CouchDB");
+                    const raw = await response.json() as { path?: unknown; children?: unknown };
+                    const encryptedPath = typeof raw.path === "string" && raw.path.startsWith("/\\:");
+                    assert(
+                        encryptedPath === encryptInternalMetadata,
+                        "The raw internal Metadata should use the selected encryption mode",
+                    );
+                    assert(
+                        Array.isArray(raw.children) && (raw.children.length === 0) === encryptInternalMetadata,
+                        "The raw chunk references should match the selected Metadata encryption mode",
+                    );
+                };
+                const assertSelectedState = async (
+                    path: FilePathWithPrefix,
+                    alias: FilePathWithPrefix,
+                    expected: string | false,
+                    deleted = false,
+                ): Promise<string> => {
+                    const id = await writer!.path2id(path);
+                    const aliasId = await writer!.path2id(alias);
+                    assert(id !== aliasId, "Internal and ordinary alias paths should have distinct IDs");
+                    const rows = await readDocuments(database, [id, aliasId]);
+                    assert(
+                        await readWriterText(writer!, path) === expected,
+                        "The selected internal document should contain the expected content: " + path,
+                    );
+                    assert(
+                        rows[1].error === "not_found",
+                        "No ordinary alias document should exist for " + alias,
+                    );
+                    if (expected === false) {
+                        if (deleted) {
+                            assert(isDeleted(rows[0]), "The selected internal document should have a tombstone: " + path);
+                        } else {
+                            assert(rows[0].error === "not_found", "The selected internal identity should be absent: " + path);
+                        }
+                    } else {
+                        assert(rows[0].doc && !isDeleted(rows[0]), "The selected internal document should be live: " + path);
+                    }
+                    return id;
+                };
+                const assertExcludedState = async (expected: string | false, message: string) => {
+                    assert(await readWriterText(writer!, excludedPath) === expected, message);
+                    await assertNoAlias(excludedAlias, "An excluded file must not create an ordinary alias");
+                };
+                const writeLocalExcludedAndWait = async (content: string, after: number) => {
+                    await Deno.writeTextFile(excludedLocalPath, content);
+                    await waitFor(
+                        () => hubDispatches.slice(after).some((event) =>
+                            event.sourceType === "storage" &&
+                            event.path === ".obsidian/app.json" &&
+                            event.data !== false &&
+                            (event.data.data instanceof Uint8Array
+                                ? new TextDecoder().decode(event.data.data)
+                                : event.data.data.join("")) === content
+                        ),
+                        "The native watcher should finish routing the local excluded write",
+                    );
+                };
+                const removeLocalExcludedAndWait = async (after: number) => {
+                    await Deno.remove(excludedLocalPath);
+                    await waitFor(
+                        () => hubDispatches.slice(after).some((event) =>
+                            event.sourceType === "storage" &&
+                            event.path === ".obsidian/app.json" &&
+                            event.data === false
+                        ),
+                        "The native watcher should finish routing the local excluded deletion",
+                    );
+                };
+
+                try {
+                    const created = await request(database, "", { method: "PUT" });
+                    const creationBody = await created.text();
+                    assert(created.ok, "Could not create watcher E2E database: HTTP " + created.status + " " + creationBody);
+                    databaseCreated = true;
+
+                    await Deno.mkdir(join(basePath, ".obsidian"), { recursive: true });
+                    await Deno.writeTextFile(excludedLocalPath, "local-existing");
+
+                    writer = new DirectFileManipulator({
+                        ...remoteConfig,
+                        syncInternalFiles: true,
+                    }, { fetch: globalThis.fetch });
+                    await writer.ready.promise;
+                    await writeRemote(ordinaryPath, "remote-note", "plain");
+                    await writeRemote(excludedPath, "remote-existing", "newnote");
+                    const excludedId = await writer.path2id(excludedPath);
+                    const excludedAliasId = await writer.path2id(excludedAlias);
+                    assert(excludedId !== excludedAliasId, "The excluded internal file should have a distinct ordinary alias ID");
+
+                    const milestone = await request(database, "/" + MILESTONE_DOCID, {
+                        method: "PUT",
+                        body: JSON.stringify({
+                            _id: MILESTONE_DOCID,
+                            created: Date.now(),
+                            tweak_values: {
+                                PREFERRED: {
+                                    ...TweakValuesTemplate,
+                                    encrypt: true,
+                                    usePathObfuscation: true,
+                                    encryptInternalMetadata,
+                                },
+                            },
+                        }),
+                    });
+                    const milestoneBody = await milestone.text();
+                    assert(milestone.ok, "Could not create remote tweaks: HTTP " + milestone.status + " " + milestoneBody);
+
+                    assert(await readWriterText(writer!, internalPath) === false, "The local selected path should have no remote identity yet");
+                    const localInternalId = await writer.path2id(internalPath);
+                    const localAliasId = await writer.path2id(internalAlias);
+                    assert(localInternalId !== localAliasId, "The selected local path should have a separate ordinary alias ID");
+                    const initiallyMissing = await readDocuments(database, [localInternalId, localAliasId]);
+                    assert(
+                        initiallyMissing[0].error === "not_found" && initiallyMissing[1].error === "not_found",
+                        "Both selected identity and ordinary alias should be absent before local creation",
+                    );
+
+                    hub.start();
+                    const remote = hub.peers.find((peer): peer is PeerCouchDB => peer instanceof PeerCouchDB);
+                    const storage = hub.peers.find((peer): peer is PeerStorage => peer instanceof PeerStorage);
+                    assert(remote && storage, "The Hub should construct real CouchDB and storage peers");
+                    for (const peer of hub.peers) {
+                        const settings = new Map<string, string>();
+                        peer.getSetting = (key) => settings.get(key) ?? null;
+                        peer.setSetting = (key, value) => {
+                            settings.set(key, value);
+                        };
+                    }
+
+                    await waitFor(
+                        () => hub.peers.length === 2 && hub.peers.every((peer) => peer.health().ok),
+                        "The real CouchDB and Deno filesystem watcher peers should become ready",
+                    );
+                    assert(
+                        remote.config.encryptInternalMetadata === encryptInternalMetadata,
+                        "The remote tweaks should select the expected internal Metadata encryption mode",
+                    );
+                    assert(remote.man, "The real CouchDB peer should own its direct manipulator");
+                    const feed = (remote.man as unknown as {
+                        changes?: {
+                            on: (event: string, listener: (change: RemoteChange) => void) => unknown;
+                            off?: (event: string, listener: (change: RemoteChange) => void) => unknown;
+                            removeListener?: (event: string, listener: (change: RemoteChange) => void) => unknown;
+                        };
+                    }).changes;
+                    assert(feed && typeof feed.on === "function", "The remote changes feed should expose its live events");
+                    changeFeed = feed;
+                    remoteChangeListener = (change) => {
+                        remoteChanges.push(change);
+                    };
+                    feed.on("change", remoteChangeListener);
+
+                    await waitForStorageText("note.md", "remote-note");
+                    await writeRemoteControl("remote-startup-barrier");
+                    assert(
+                        await readStorageFile(".obsidian/app.json") === "local-existing",
+                        "The initial excluded remote file should preserve the local counterpart",
+                    );
+                    await assertExcludedState("remote-existing", "The independent writer should retain the excluded remote file");
+
+                    await Deno.mkdir(join(basePath, ".claude"), { recursive: true });
+                    await Deno.writeTextFile(localHiddenPath, "local-created");
+                    await waitForWriterText(internalPath, "local-created");
+                    assert(
+                        await assertSelectedState(internalPath, internalAlias, "local-created") === localInternalId,
+                        "A new local hidden file should create the canonical i: document from a missing identity",
+                    );
+                    await assertRawMetadataMode(localInternalId);
+
+                    await writeRemote(internalPath, "remote-round-trip-update", "newnote");
+                    await waitForStorageText(".claude/settings.json", "remote-round-trip-update");
+                    assert(
+                        await assertSelectedState(internalPath, internalAlias, "remote-round-trip-update") === localInternalId,
+                        "A remote edit of the locally-created file should return through the same internal identity",
+                    );
+
+                    await Deno.writeTextFile(localHiddenPath, "local-updated-with-more-content");
+                    await waitForWriterText(internalPath, "local-updated-with-more-content");
+                    assert(
+                        await assertSelectedState(internalPath, internalAlias, "local-updated-with-more-content") === localInternalId,
+                        "A local update should retain the selected internal document ID",
+                    );
+
+                    await Deno.remove(localHiddenPath);
+                    await waitForWriterText(internalPath, false);
+                    assert(
+                        await assertSelectedState(internalPath, internalAlias, false, true) === localInternalId,
+                        "A local deletion should tombstone the same selected internal document",
+                    );
+
+                    const remoteIdBeforeCreate = await writer.path2id(remoteHiddenPath);
+                    assert(
+                        await readWriterText(writer!, remoteHiddenPath) === false,
+                        "The independent remote selected path should start absent",
+                    );
+                    await writeRemote(remoteHiddenPath, "remote-created", "newnote");
+                    await waitForStorageText(".claude/remote.json", "remote-created");
+                    assert(
+                        await assertSelectedState(remoteHiddenPath, remoteHiddenAlias, "remote-created") === remoteIdBeforeCreate,
+                        "A remote selected creation should use its canonical i: identity",
+                    );
+                    await assertRawMetadataMode(remoteIdBeforeCreate);
+
+                    await writeRemote(remoteHiddenPath, "remote-updated-with-more-content", "newnote");
+                    await waitForStorageText(".claude/remote.json", "remote-updated-with-more-content");
+                    assert(
+                        await assertSelectedState(remoteHiddenPath, remoteHiddenAlias, "remote-updated-with-more-content") === remoteIdBeforeCreate,
+                        "A remote selected update should retain the same internal identity",
+                    );
+                    assert(
+                        await readWriterText(writer!, ordinaryPath) === "remote-startup-barrier",
+                        "The ordinary note control should remain mapped through baseDir",
+                    );
+
+                    assert(await writer.delete(remoteHiddenPath), "The independent writer should delete its selected internal document");
+                    await waitForStorageText(".claude/remote.json", false);
+                    assert(
+                        await assertSelectedState(remoteHiddenPath, remoteHiddenAlias, false, true) === remoteIdBeforeCreate,
+                        "A remote selected deletion should tombstone the same internal document",
+                    );
+
+                    const excludedChangeId = await writer.path2id(excludedPath);
+                    let nextRemoteChange = remoteChanges.length;
+                    await writeRemote(excludedPath, "remote-updated", "newnote");
+                    await waitForRemoteChange(nextRemoteChange, excludedPath, excludedChangeId);
+                    await writeRemoteControl("remote-barrier-after-excluded-update");
+                    assert(
+                        await readStorageFile(".obsidian/app.json") === "local-existing",
+                        "An excluded remote update should preserve the existing local file",
+                    );
+                    await assertExcludedState("remote-updated", "The excluded remote update should remain at its internal identity");
+
+                    nextRemoteChange = remoteChanges.length;
+                    assert(await writer.delete(excludedPath), "The independent writer should delete its excluded internal document");
+                    await waitForRemoteChange(nextRemoteChange, excludedPath, excludedChangeId);
+                    await writeRemoteControl("remote-barrier-after-excluded-delete");
+                    assert(
+                        await readStorageFile(".obsidian/app.json") === "local-existing",
+                        "An excluded remote deletion should preserve the existing local file",
+                    );
+                    await assertExcludedState(false, "The excluded remote deletion should leave no internal document or alias");
+
+                    await removeLocalExcludedAndWait(hubDispatches.length);
+                    const firstExcludedWrite = hubDispatches.length;
+                    await writeLocalExcludedAndWait("local-created-after-remote-delete", firstExcludedWrite);
+                    await writeLocalControl("local-barrier-after-excluded-create");
+                    await assertExcludedState(false, "A local excluded creation should leave both remote identities absent");
+
+                    nextRemoteChange = remoteChanges.length;
+                    await writeRemote(excludedPath, "remote-recreated", "newnote");
+                    await waitForRemoteChange(nextRemoteChange, excludedPath, excludedChangeId);
+                    await writeRemoteControl("remote-barrier-after-excluded-create");
+                    assert(
+                        await readStorageFile(".obsidian/app.json") === "local-created-after-remote-delete",
+                        "An excluded remote creation should preserve the local counterpart",
+                    );
+                    await assertExcludedState("remote-recreated", "The remote excluded creation should remain internal without an alias");
+
+                    const secondExcludedWrite = hubDispatches.length;
+                    await writeLocalExcludedAndWait("local-updated-with-remote-counterpart", secondExcludedWrite);
+                    await writeLocalControl("local-barrier-after-excluded-update");
+                    await assertExcludedState(
+                        "remote-recreated",
+                        "A local excluded update should preserve the remote internal counterpart",
+                    );
+
+                    const excludedDelete = hubDispatches.length;
+                    await removeLocalExcludedAndWait(excludedDelete);
+                    await writeLocalControl("local-barrier-after-excluded-delete");
+                    await assertExcludedState(
+                        "remote-recreated",
+                        "A local excluded deletion should preserve the live remote internal counterpart",
+                    );
+                    assert(
+                        await readStorageFile(".obsidian/app.json") === false,
+                        "The local excluded deletion should leave its local path absent",
+                    );
+                } finally {
+                    if (changeFeed && remoteChangeListener) {
+                        if (changeFeed.off) {
+                            changeFeed.off("change", remoteChangeListener);
+                        } else {
+                            changeFeed.removeListener?.("change", remoteChangeListener);
+                        }
+                    }
+                    await Promise.allSettled(hub.peers.map((peer) => peer.stop()));
+                    await Promise.allSettled([
+                        ...hub.peers.filter((peer): peer is PeerCouchDB => peer instanceof PeerCouchDB).map((peer) => peer.man?.close()),
+                        writer?.close(),
+                    ]);
+                    if (databaseCreated) {
+                        const deleted = await request(database, "", { method: "DELETE" });
+                        await deleted.body?.cancel();
+                    }
+                    await Deno.remove(basePath, { recursive: true });
+                }
+            },
+        );
+    }
+}
+
+type RemoteChange = {
+    id?: string;
+    _id?: string;
+    path?: string;
+    doc?: { _id?: string; path?: string };
+};
+
+async function readWriterText(
+    writer: DirectFileManipulator,
+    path: FilePathWithPrefix,
+): Promise<string | false> {
+    const result = await writer.get(path);
+    if (result === false) return false;
+    return result.type === "newnote"
+        ? new TextDecoder().decode(decodeBinary(result.data))
+        : getDocData(result.data);
 }
