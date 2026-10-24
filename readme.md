@@ -203,9 +203,17 @@ With a key configured, the bridge uses ID derivation version 1 unless `idDerivat
 
 ## Synchronising internal/hidden files
 
-By default, the bridge skips all of Self-hosted LiveSync's internal documents — the ones stored with an `i:` prefix, such as files inside hidden folders like `.obsidian/`, `.claude/`, and other tool configuration directories. These are normally left out of the sync.
+This bidirectional routing change remains unreleased.
 
-The optional `includeInternal` field opts specific internal paths back in. It takes an array of [minimatch](https://github.com/isaacs/minimatch) glob patterns that are matched against the path **after** the `i:` prefix is stripped:
+By default, the bridge skips Self-hosted LiveSync's internal documents, stored
+with an `i:` prefix. The optional `includeInternal` field selects hidden files
+whose first Vault-root path component begins with a dot, such as
+`.claude/settings.json` or `.settings.json`. An omitted or empty list selects
+no internal files.
+
+It takes an array of [minimatch](https://github.com/isaacs/minimatch) glob
+patterns matched against the complete Vault-root path after removing the `i:`
+prefix:
 
 ```jsonc
 {
@@ -213,11 +221,41 @@ The optional `includeInternal` field opts specific internal paths back in. It ta
   "name": "test1",
   // ...
   "baseDir": "blog/",
-  "includeInternal": [".claude/**"] // Sync everything under .claude/
+  "includeInternal": [".claude/**"] // Share selected .claude files in both directions
 }
 ```
 
-A document is included when its de-prefixed path matches any one of the patterns. Patterns are matched with the `dot` option, so leading-dot folders such as `.claude/` are matched as expected.
+A hidden file is included when its path matches any pattern. Patterns use the
+`dot` option, so hidden subdirectories are matched too. A broad pattern such as
+`**` still leaves ordinary notes on their ordinary route. Other internal paths,
+such as `i:note.md`, are outside this feature.
+
+Internal paths are relative to the Vault root, independently of `baseDir`.
+The example selects ordinary documents below `blog/` and internal files below
+`.claude/` at the Vault root. The internal document
+`i:.claude/settings.json` maps to `.claude/settings.json` below the storage
+peer's root. Local creation, edits, and deletion use that same internal document
+on the return route, including after restart.
+
+Each CouchDB peer applies its own `includeInternal` patterns in both directions.
+Opting one peer in does not enable another peer. An excluded hidden file has no
+ordinary fallback route. Storage peers' sending exclusions remain separate;
+see [Excluding paths from a storage peer](#excluding-paths-from-a-storage-peer).
+
+On CouchDB peers, shared paths beginning with a dot are reserved for this
+internal route. Ordinary documents such as `blog/.claude/settings.json` are
+excluded, and a hidden Vault-root folder cannot serve as an ordinary sharing
+folder. Before using an internal path, the bridge checks for a live ordinary
+document at `baseDir` joined with that shared path. If one exists, the bridge
+reports both paths and blocks the internal operation, preserving both documents
+and any existing storage file. A failed collision check also blocks the
+operation. A deleted ordinary document does not block it. The bridge does not
+merge, migrate, or delete conflicting documents automatically.
+
+Changing `includeInternal` or resolving a collision does not replay previously
+skipped changes. A later source change can trigger synchronisation. To rescan
+existing files, restart with `--reset`; this clears the stored scan and resume
+state for all peers.
 
 > [!CAUTION]
 > This synchronises files that are normally hidden and internal. Such folders often hold tool configuration that can contain machine-specific paths, local settings, or secrets. Only include patterns you genuinely intend to share, and review what they match before enabling. The option is opt-in: leave it out to keep the default behaviour, where all internal/hidden files are skipped.
@@ -351,3 +389,8 @@ Totally, all files are synchronized like this:
   ]
 }
 ````
+
+## Developer documentation
+
+- [Internal-file synchronisation design](docs/design_docs/internal_file_synchronisation.md): accepted path, selection, and verification contract; implementation remains unreleased.
+- [Internal-file synchronisation ADR](docs/adr/2026_10_internal_file_synchronisation.md): rationale, alternatives, and compatibility effects.

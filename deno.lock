@@ -9,7 +9,7 @@
     "npm:@types/node@*": "24.1.0",
     "npm:@types/pouchdb@*": "6.4.2",
     "npm:@types/pouchdb@^6.4.2": "6.4.2",
-    "npm:@vrtmrz/livesync-commonlib@0.1.39": "0.1.39",
+    "npm:@vrtmrz/livesync-commonlib@0.2.0": "0.2.0",
     "npm:chokidar@^3.5.1": "3.6.0",
     "npm:minimatch@^10.2.5": "10.2.6",
     "npm:octagonal-wheels@~0.1.53": "0.1.55"
@@ -23,6 +23,22 @@
     }
   },
   "npm": {
+    "@aws-crypto/sha256-js@5.2.0": {
+      "integrity": "sha512-FFQQyu7edu4ufvIZ+OadFpHHOt+eSTBaYaki44c+akjg7qZg9oOQeLlk77F6tSYqjDAFClrHJk9tMf0HdVyOvA==",
+      "dependencies": [
+        "@aws-crypto/util",
+        "@aws-sdk/types",
+        "tslib"
+      ]
+    },
+    "@aws-crypto/util@5.2.0": {
+      "integrity": "sha512-4RkU9EsI6ZpBve5fseQlGNUWKMa1RLPQ1dnjnQoe07ldfIzcsGb5hC5W0Dm7u423KWzawlrpbjXBrXCEv9zazQ==",
+      "dependencies": [
+        "@aws-sdk/types",
+        "@smithy/util-utf8",
+        "tslib"
+      ]
+    },
     "@aws-sdk/checksums@3.1001.3": {
       "integrity": "sha512-CcAkVyEUKGngbEqJdVdSc53Iy52+XzVL5NIcTen2BlK8UByNC1DThVtf5VKSrNzyA+SqyTvs+3S+knVBbOUizQ==",
       "dependencies": [
@@ -33,8 +49,8 @@
         "tslib"
       ]
     },
-    "@aws-sdk/client-s3@3.1151.0": {
-      "integrity": "sha512-Kg20OP7F+rrWMFjPv/aCsNUt/qDbvh1bLJFQM8k/8fnxowR/DA67qL5KHzWWN5gwJCYplS3KQde6P/knOB+lxg==",
+    "@aws-sdk/client-s3@3.1152.0": {
+      "integrity": "sha512-oI1+ZaM6pSOwZazu4nAb7rL8ug7LSjg31tDoJqRB9MooRqqWCf/qvkIZqne1mRA3xK3slg6K0RNWXaJYHbWLvg==",
       "dependencies": [
         "@aws-sdk/checksums",
         "@aws-sdk/core",
@@ -249,6 +265,12 @@
         "tslib"
       ]
     },
+    "@smithy/is-array-buffer@2.2.0": {
+      "integrity": "sha512-GGP3O9QFD24uGeAXYUjwSTXARoqpZykHadOmA8G5vfJPK0/DC67qa//0qvqrJzL1xc8WQWX7/yc7fwudjPHPhA==",
+      "dependencies": [
+        "tslib"
+      ]
+    },
     "@smithy/md5-js@4.5.2": {
       "integrity": "sha512-EC8CXhy/Y3DHniNBPK63ECkYir91IpFhIbVOo/Z7y75hO3RMFY0v+b6MUPLVp0TBtTRo+A5uU73yqyrTecTJmw==",
       "dependencies": [
@@ -286,10 +308,24 @@
         "tslib"
       ]
     },
+    "@smithy/util-buffer-from@2.2.0": {
+      "integrity": "sha512-IJdWBbTcMQ6DA0gdNhh/BwrLkDR+ADW5Kr1aZmd4k3DIF6ezMV4R2NIAmT08wQJ3yUK82thHWmC/TnK/wpMMIA==",
+      "dependencies": [
+        "@smithy/is-array-buffer",
+        "tslib"
+      ]
+    },
     "@smithy/util-retry@4.6.2": {
       "integrity": "sha512-q6MXFNu+W4ZCNdNKutzDLP/Hzumd1FU9CQX++P/7ylanYIYiGhgZwSzwZWAw+G1RNcfY+RBYv61XcGlSYhj+BA==",
       "dependencies": [
         "@smithy/core",
+        "tslib"
+      ]
+    },
+    "@smithy/util-utf8@2.3.0": {
+      "integrity": "sha512-R8Rdn8Hy72KKcebgLiv8jQcQkXoLMOGGv5uI1/k0l+snqkOzQ1R0ChUBCxWMlBsFMekWjq0wRudIweFs7sKT5A==",
+      "dependencies": [
+        "@smithy/util-buffer-from",
         "tslib"
       ]
     },
@@ -450,9 +486,10 @@
         "@types/pouchdb-replication"
       ]
     },
-    "@vrtmrz/livesync-commonlib@0.1.39": {
-      "integrity": "sha512-AUjQI1fgR+4KOYpuwZfFjVJeSt9JDNSLMAlLoLuh/553CzMnqTfwqopVItKP3b3SrdVQbyGbJLQeGEhuDMoJ9Q==",
+    "@vrtmrz/livesync-commonlib@0.2.0": {
+      "integrity": "sha512-K24Pkke+FTjZI7DjIV7qkZk+BmC9VebN3da+2cVD9SWOgoGl7OvDyXTHDafbrmmM4vi4ydaydAEh9glO1xHF6A==",
       "dependencies": [
+        "@aws-crypto/sha256-js",
         "@aws-sdk/client-s3",
         "@smithy/fetch-http-handler",
         "@smithy/md5-js",
@@ -460,6 +497,7 @@
         "@smithy/types",
         "@smithy/util-retry",
         "@trystero-p2p/nostr",
+        "@vrtmrz/value-store",
         "diff-match-patch",
         "events",
         "fflate",
@@ -471,9 +509,11 @@
         "pouchdb-adapter-idb",
         "pouchdb-adapter-indexeddb",
         "pouchdb-adapter-memory",
+        "pouchdb-checkpointer",
         "pouchdb-core",
         "pouchdb-errors",
         "pouchdb-find",
+        "pouchdb-generate-replication-id",
         "pouchdb-mapreduce",
         "pouchdb-merge",
         "pouchdb-replication",
@@ -482,6 +522,9 @@
         "transform-pouch",
         "xxhash-wasm-102@npm:xxhash-wasm@1.1.0"
       ]
+    },
+    "@vrtmrz/value-store@0.1.0": {
+      "integrity": "sha512-M62f1j0bnJkqpgI5sYxnkXUAOSDEwQbYrLf+w58gCCm4sjIXDmFzDJd2duXabRbktBlACt9P99yjN/9gOAPxrA=="
     },
     "abstract-leveldown@2.7.2": {
       "integrity": "sha512-+OVvxH2rHVEhWLdbudP6p0+dNMXu8JA1CbhP19T8paTYAcX7oJ4OVjT+ZUVpv7mITxXHqDMej+GdqXBmXkw09w==",
@@ -1111,7 +1154,7 @@
       "jsr:@std/path@^1.0.9",
       "npm:@types/diff-match-patch@^1.0.36",
       "npm:@types/pouchdb@^6.4.2",
-      "npm:@vrtmrz/livesync-commonlib@0.1.39",
+      "npm:@vrtmrz/livesync-commonlib@0.2.0",
       "npm:chokidar@^3.5.1",
       "npm:minimatch@^10.2.5",
       "npm:octagonal-wheels@~0.1.53"
