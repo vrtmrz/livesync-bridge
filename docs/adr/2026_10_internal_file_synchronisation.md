@@ -10,10 +10,13 @@ status: unreleased
 
 Accepted on 2026-10-23. The bridge implementation remains unreleased. It now
 pins published Commonlib `0.2.0`, which exposes and propagates the required
-`syncInternalFiles` option. Normal installation, type checks, lint, unit tests,
-and real CouchDB integration and storage E2E tests passed on 2026-10-24. The
-companion [design document](../design_docs/internal_file_synchronisation.md)
-defines the path rules, compatibility effects, verification, and remaining
+`syncInternalFiles` option. Initial consumer validation passed on 2026-10-24.
+Further native-watcher tests exposed stale writes after incoming changes; those
+regressions pass locally after changing delayed writes to read current content.
+The cause of an initial CI creation timeout remains unresolved; a parent-only
+notification sequence has not been established. The companion
+[design document](../design_docs/internal_file_synchronisation.md) defines the
+path rules, compatibility effects, current verification results, and remaining
 runtime limits.
 
 ## Context

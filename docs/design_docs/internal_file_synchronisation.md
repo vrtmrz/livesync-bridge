@@ -170,6 +170,17 @@ stop sending local changes, while incoming writes and deletions remain accepted.
 They do not replace a CouchDB peer's `includeInternal` selection.
 Storage-to-storage changes do not acquire a CouchDB policy.
 
+A delayed storage write reads the current file content after waiting in the
+outgoing queue and its notification delay. An incoming update or deletion
+completed during that wait supersedes the earlier notification. The existing
+repeat check suppresses received content; a later local edit can still be sent.
+Skip files that disappear before the read, and report other read failures
+without changing repeat-suppression state or sending a replacement. Record
+modification time and size for offline change detection only after a successful
+read, so a failed read leaves the local edit eligible for a later offline scan.
+This applies to ordinary and hidden files. The filesystem read and Hub delivery
+remain separate operations, with no transaction against concurrent writers.
+
 Internal Metadata encryption changes representation, not eligibility or
 identity. Use Commonlib's decoded logical path; keep its existing encryption,
 path obfuscation, and ID-derivation checks. This feature must work with
@@ -199,22 +210,24 @@ Add focused regression tests before changing production behaviour. Confirm that
 each test fails for its expected behavioural reason against the previous
 implementation, then rerun it after the change. The required cases are:
 
-| Case                                                     | Required observation                                                                                                 |
-| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Missing or empty patterns, including raw permission true | No hidden-file delivery, creation, update, or deletion for empty and non-empty `baseDir`.                            |
-| Selected internal create, update, and deletion           | Reach the expected storage path with empty and non-empty `baseDir`; retain an ordinary note as a control.            |
-| Unmatched and non-prefixed hidden documents              | Remain excluded after library permission is enabled, including with a hidden CouchDB `baseDir`.                      |
-| New local selected hidden file                           | Creates only the `i:` document; no ordinary alias is created.                                                        |
-| Local update, read, Metadata lookup, and deletion        | Address the same internal identity and preserve unrelated documents.                                                 |
-| Fresh peer with an empty repeat cache                    | Uses the same internal identity for a local edit and deletion.                                                       |
-| Two CouchDB peers with different selections              | Each enforces its own opt-in; no ordinary fallback at the destination.                                               |
-| Broad pattern and invalid internal path                  | `**` leaves ordinary notes ordinary; non-hidden `i:` paths, traversal components, and other namespaces are excluded. |
-| Folder mapping                                           | Trim `baseDir` once, respect its boundary, and preserve the complete internal path.                                  |
-| Live ordinary alias                                      | Reject internal operations without modifying either document or storage; identify the collision.                     |
-| Deleted ordinary alias                                   | Does not block an otherwise eligible internal operation.                                                             |
-| Alias inspection failure                                 | No internal mutation or delivery; report the failed check instead of treating it as an absent alias.                 |
-| Rebuild and remote tweaks                                | Preserve the derived library permission without widening selection.                                                  |
-| Internal Metadata encryption off and on                  | Equivalent selected create, update, and delete behaviour through real CouchDB and storage.                           |
+| Case                                                     | Required observation                                                                                                               |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Missing or empty patterns, including raw permission true | No hidden-file delivery, creation, update, or deletion for empty and non-empty `baseDir`.                                          |
+| Selected internal create, update, and deletion           | Reach the expected storage path with empty and non-empty `baseDir`; retain an ordinary note as a control.                          |
+| Unmatched and non-prefixed hidden documents              | Remain excluded after library permission is enabled, including with a hidden CouchDB `baseDir`.                                    |
+| New local selected hidden file                           | Creates only the `i:` document; no ordinary alias is created.                                                                      |
+| Local update, read, Metadata lookup, and deletion        | Address the same internal identity and preserve unrelated documents.                                                               |
+| Fresh peer with an empty repeat cache                    | Uses the same internal identity for a local edit and deletion.                                                                     |
+| Two CouchDB peers with different selections              | Each enforces its own opt-in; no ordinary fallback at the destination.                                                             |
+| Broad pattern and invalid internal path                  | `**` leaves ordinary notes ordinary; non-hidden `i:` paths, traversal components, and other namespaces are excluded.               |
+| Folder mapping                                           | Trim `baseDir` once, respect its boundary, and preserve the complete internal path.                                                |
+| Live ordinary alias                                      | Reject internal operations without modifying either document or storage; identify the collision.                                   |
+| Deleted ordinary alias                                   | Does not block an otherwise eligible internal operation.                                                                           |
+| Alias inspection failure                                 | No internal mutation or delivery; report the failed check instead of treating it as an absent alias.                               |
+| Rebuild and remote tweaks                                | Preserve the derived library permission without widening selection.                                                                |
+| Internal Metadata encryption off and on                  | Equivalent selected create, update, and delete behaviour through real CouchDB and storage.                                         |
+| Incoming change while a storage write waits              | Preserve the received update or deletion, suppress its echo, and deliver a later local edit.                                       |
+| File missing or unreadable during an outgoing write      | Skip a missing file; report other read failures and preserve file content, repeat-suppression state, and offline change detection. |
 
 Use focused in-memory tests for routing and identity, and real CouchDB to check
 representation and delivery through the Hub and storage peer. Fresh fixtures do
@@ -224,11 +237,11 @@ those limits separately from a passing bridge test suite.
 
 ### Validation on 2026-10-24
 
-With published Commonlib `0.2.0` and Deno `2.9.7`, normal frozen installation
-and type checks passed for both the baseline with only its dependency updated
-and the implementation described here. Lint, 156 unit tests, and 10 integration
-and E2E tests also passed with the normal project configuration, without local
-package links or a replacement configuration.
+Initial consumer validation with published Commonlib `0.2.0` and Deno `2.9.7`
+passed normal frozen installation and type checks for both the baseline with
+only its dependency updated and the implementation described here. Lint, 156
+unit tests, and 10 integration and E2E tests also passed with the normal project
+configuration, without local package links or a replacement configuration.
 
 The real CouchDB `3.5.0` cases cover empty and `blog/` sharing folders with
 `encryptInternalMetadata` both disabled and enabled. They verify selected remote
@@ -237,6 +250,36 @@ peer, shared-path reads and Metadata lookup, preservation of excluded files, and
 blocking and recovery after deletion of an ordinary alias. In-memory tests cover
 fresh-peer identity, per-peer selection, invalid paths, alias lookup failures,
 selection before content loading, and rejection before repeat suppression.
+
+Additional native-watcher tests exposed an outgoing write that retained stale
+content across its delay and recreated a selected CouchDB document after an
+incoming deletion. Before the storage fix, focused regressions failed for
+ordinary and hidden files, and all eight native-watcher conditions failed the
+check that the selected document stayed deleted after queued work finished.
+After reading content following the delay, all six focused regressions and all
+18 local CouchDB integration and E2E tests passed. Those include eight
+native-watcher conditions: empty and `blog/` sharing folders, internal Metadata
+encryption off and on, and a selected directory created before or after watcher
+startup. The tests retain immediate directory creation followed by file
+creation, check deletion persistence, and record native events and Hub routes on
+failure.
+
+Repeat validation with Deno `2.9.8` passed all 163 unit tests and all 18 CouchDB
+integration and E2E tests. An exploratory case supplied only a parent-directory
+creation event while child files were already present. It did not deliver those
+files, but it did not reproduce the CI failure or establish an additional
+acceptance criterion. Subtree enumeration on directory creation is outside this
+change. The child-file-event control remains in the unit suite.
+
+[CI run 45](https://github.com/vrtmrz/livesync-bridge/actions/runs/40094079892)
+also timed out while waiting for the first newly created selected file with
+`baseDir: "blog/"` and internal Metadata encryption disabled. Its raw filesystem
+events were not captured. CI used Deno `2.9.8` on x86_64, whereas the initial
+local validation used Deno `2.9.7` on aarch64. The local directory comparisons
+have not reproduced that timeout, so the parent-only model does not establish
+its cause, and passing local tests do not demonstrate a fix for that CI failure.
+Failure diagnostics now include the Deno version and build target as well as
+native events and Hub routes.
 
 The reporter's existing Vault and a real Obsidian client's application of
 bridge-produced hidden-file changes remain unverified. The collision check is

@@ -247,32 +247,38 @@ export class PeerStorage extends Peer {
         }
     }
 
-    async dispatch(pathSrc: string) {
+    dispatch(pathSrc: string): Promise<void> {
         const lP = this.toStoragePath(this.toLocalPath("."));
         const path = this.toPosixPath(relative(lP, pathSrc));
-        if (this.isOutsideBaseDir(path)) return;
+        if (this.isOutsideBaseDir(path)) return Promise.resolve();
 
         if (this.isIgnored(path)) {
             this.debugLog(`${path} ignored`);
-            return;
+            return Promise.resolve();
         }
 
-        const data = await this.get(path);
-
-        if (data === false) return;
-
         scheduleOnceIfDuplicated(pathSrc, async () => {
-            // console.log(data);
-            await this.writeFileStat(path);
-            await delay(250);
+            let data: FileData | false;
+            try {
+                await delay(250);
+                // Read after waiting so a completed incoming update or deletion
+                // supersedes the earlier watcher event's content.
+                data = await this.get(path);
+                if (data !== false) await this.writeFileStat(path);
+            } catch (ex) {
+                if (!(ex instanceof Deno.errors.NotFound)) {
+                    this.normalLog(`File read failed: ${path}`, LOG_LEVEL_NOTICE);
+                    Logger(ex, LOG_LEVEL_VERBOSE);
+                }
+                return;
+            }
+            if (data === false) return;
             if (!await this.isRepeating(path, data)) {
                 this.sendLog(`${path} change detected`);
                 await this.dispatchToHub(this, this.toGlobalPath(path), data);
             }
-            // else {
-            //     this.sendLog(`${path} change repeating detected`);
-            // }
         });
+        return Promise.resolve();
     }
     async dispatchDeleted(pathSrc: string) {
         const lP = this.toStoragePath(this.toLocalPath("."));

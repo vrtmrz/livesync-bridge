@@ -1,4 +1,4 @@
-import { join, resolve, SEPARATOR } from "@std/path";
+import { join, relative, resolve, SEPARATOR } from "@std/path";
 import {
     MILESTONE_DOCID,
     TweakValuesTemplate,
@@ -11,6 +11,7 @@ import type { FileData, PeerCouchDBConf, PeerStorageConf } from "../../types.ts"
 import { DirectFileManipulator } from "@vrtmrz/livesync-commonlib";
 import { getDocData } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import { decodeBinary } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/convert";
+import { isLockAcquired } from "octagonal-wheels/concurrency/lock";
 
 const couchDbUrl = Deno.env.get("COUCHDB_URL") ?? "http://127.0.0.1:5989";
 const authorization = `Basic ${btoa(`${Deno.env.get("COUCHDB_USERNAME") ?? "admin"}:${Deno.env.get("COUCHDB_PASSWORD") ?? "testpassword"}`)}`;
@@ -202,10 +203,16 @@ for (const parentOnly of [false, true]) {
     });
 }
 for (const baseDir of ["", "blog/"]) {
-    for (const encryptInternalMetadata of [false, true]) {
+    for (const { encryptInternalMetadata, directoryExistsBeforeWatch } of [
+        { encryptInternalMetadata: false, directoryExistsBeforeWatch: false },
+        { encryptInternalMetadata: true, directoryExistsBeforeWatch: false },
+        { encryptInternalMetadata: false, directoryExistsBeforeWatch: true },
+        { encryptInternalMetadata: true, directoryExistsBeforeWatch: true },
+    ]) {
         Deno.test(
             "Native watcher synchronises selected hidden files | baseDir: " +
-                (baseDir || "empty") + " | encrypted metadata: " + encryptInternalMetadata,
+                (baseDir || "empty") + " | encrypted metadata: " + encryptInternalMetadata +
+                " | directory: " + (directoryExistsBeforeWatch ? "pre-existing" : "newly created"),
             async () => {
                 const suffix = crypto.randomUUID().replaceAll("-", "");
                 const database = "livesync_bridge_watcher_" + suffix;
@@ -239,10 +246,69 @@ for (const baseDir of ["", "blog/"]) {
                     path: string;
                     data: FileData | false;
                 }> = [];
+                const startedAt = Date.now();
+                let stage = "setup";
+                let pendingHubDispatches = 0;
+                let lastNativeEventAt = startedAt;
+                const nativeEvents: Array<{ elapsedMs: number; kind: string; paths: string[] }> = [];
+                const hubRoutes: Array<{
+                    elapsedMs: number;
+                    phase: string;
+                    sourceType: string;
+                    path: string;
+                    content: string | false;
+                }> = [];
+                const originalWatchFs = Deno.watchFs;
+                Deno.watchFs = ((...args: Parameters<typeof Deno.watchFs>) => {
+                    const watcher = originalWatchFs(...args);
+                    const iterator = watcher[Symbol.asyncIterator]();
+                    return {
+                        async next() {
+                            const result = await iterator.next();
+                            if (!result.done) {
+                                lastNativeEventAt = Date.now();
+                                nativeEvents.push({
+                                    elapsedMs: lastNativeEventAt - startedAt,
+                                    kind: result.value.kind,
+                                    paths: result.value.paths.map((path) => relative(basePath, path)),
+                                });
+                            }
+                            return result;
+                        },
+                        [Symbol.asyncIterator]() { return this; },
+                        close: () => watcher.close(),
+                        [Symbol.dispose]: () => watcher.close(),
+                    } as unknown as Deno.FsWatcher;
+                }) as typeof Deno.watchFs;
                 const originalDispatch = hub.dispatch.bind(hub);
                 hub.dispatch = async (source, path, data) => {
-                    await originalDispatch(source, path, data);
-                    hubDispatches.push({ sourceType: source.config.type, path, data });
+                    const route = {
+                        sourceType: source.config.type,
+                        path,
+                        content: data === false ? false as const : (data.data instanceof Uint8Array
+                            ? new TextDecoder().decode(data.data) : data.data.join("")).slice(0, 240),
+                    };
+                    pendingHubDispatches++;
+                    hubRoutes.push({ ...route, phase: "started", elapsedMs: Date.now() - startedAt });
+                    try {
+                        await originalDispatch(source, path, data);
+                        hubDispatches.push({ sourceType: source.config.type, path, data });
+                        hubRoutes.push({ ...route, phase: "completed", elapsedMs: Date.now() - startedAt });
+                    } catch (error) {
+                        hubRoutes.push({ ...route, phase: "failed", elapsedMs: Date.now() - startedAt });
+                        throw error;
+                    } finally {
+                        pendingHubDispatches--;
+                    }
+                };
+                const waitForWatcherWork = async () => {
+                    await waitFor(
+                        () => Date.now() - lastNativeEventAt >= 500 && pendingHubDispatches === 0 &&
+                            [".claude/settings.json", ".claude/remote.json", "note.md"].every((path) =>
+                                !isLockAcquired(join(basePath, path))
+                            ),
+                        "Native events, queued selected writes, and Hub dispatches should settle",
+                    );
                 };
 
                 const localHiddenPath = join(basePath, ".claude", "settings.json");
@@ -405,6 +471,9 @@ for (const baseDir of ["", "blog/"]) {
 
                     await Deno.mkdir(join(basePath, ".obsidian"), { recursive: true });
                     await Deno.writeTextFile(excludedLocalPath, "local-existing");
+                    if (directoryExistsBeforeWatch) {
+                        await Deno.mkdir(join(basePath, ".claude"), { recursive: true });
+                    }
 
                     writer = new DirectFileManipulator({
                         ...remoteConfig,
@@ -445,6 +514,7 @@ for (const baseDir of ["", "blog/"]) {
                         "Both selected identity and ordinary alias should be absent before local creation",
                     );
 
+                    stage = "watcher startup";
                     hub.start();
                     const remote = hub.peers.find((peer): peer is PeerCouchDB => peer instanceof PeerCouchDB);
                     const storage = hub.peers.find((peer): peer is PeerStorage => peer instanceof PeerStorage);
@@ -488,6 +558,7 @@ for (const baseDir of ["", "blog/"]) {
                     );
                     await assertExcludedState("remote-existing", "The independent writer should retain the excluded remote file");
 
+                    stage = "first local selected creation";
                     await Deno.mkdir(join(basePath, ".claude"), { recursive: true });
                     await Deno.writeTextFile(localHiddenPath, "local-created");
                     await waitForWriterText(internalPath, "local-created");
@@ -497,6 +568,7 @@ for (const baseDir of ["", "blog/"]) {
                     );
                     await assertRawMetadataMode(localInternalId);
 
+                    stage = "selected round trip and local deletion";
                     await writeRemote(internalPath, "remote-round-trip-update", "newnote");
                     await waitForStorageText(".claude/settings.json", "remote-round-trip-update");
                     assert(
@@ -518,6 +590,7 @@ for (const baseDir of ["", "blog/"]) {
                         "A local deletion should tombstone the same selected internal document",
                     );
 
+                    stage = "independent remote selected creation and update";
                     const remoteIdBeforeCreate = await writer.path2id(remoteHiddenPath);
                     assert(
                         await readWriterText(writer!, remoteHiddenPath) === false,
@@ -542,6 +615,7 @@ for (const baseDir of ["", "blog/"]) {
                         "The ordinary note control should remain mapped through baseDir",
                     );
 
+                    stage = "independent remote selected deletion";
                     assert(await writer.delete(remoteHiddenPath), "The independent writer should delete its selected internal document");
                     await waitForStorageText(".claude/remote.json", false);
                     assert(
@@ -549,6 +623,12 @@ for (const baseDir of ["", "blog/"]) {
                         "A remote selected deletion should tombstone the same internal document",
                     );
 
+                    await waitForWatcherWork();
+                    assert(await readStorageFile(".claude/remote.json") === false,
+                        "The selected remote deletion should remain absent after queued watcher work");
+                    await assertSelectedState(remoteHiddenPath, remoteHiddenAlias, false, true);
+
+                    stage = "excluded files and ordinary controls";
                     const excludedChangeId = await writer.path2id(excludedPath);
                     let nextRemoteChange = remoteChanges.length;
                     await writeRemote(excludedPath, "remote-updated", "newnote");
@@ -605,7 +685,62 @@ for (const baseDir of ["", "blog/"]) {
                         await readStorageFile(".obsidian/app.json") === false,
                         "The local excluded deletion should leave its local path absent",
                     );
+                    stage = "final selected deletion persistence";
+                    await waitForWatcherWork();
+                    for (const path of [".claude/settings.json", ".claude/remote.json"]) {
+                        assert(await readStorageFile(path) === false,
+                            "Selected deletions should remain absent on disk: " + path);
+                    }
+                    await assertSelectedState(internalPath, internalAlias, false, true);
+                    await assertSelectedState(remoteHiddenPath, remoteHiddenAlias, false, true);
+                } catch (error) {
+                    const capture = async (read: () => Promise<unknown>) => {
+                        try {
+                            return await read();
+                        } catch (snapshotError) {
+                            return { error: String(snapshotError) };
+                        }
+                    };
+                    console.error("Native watcher failure diagnostics " + JSON.stringify({
+                        runtime: { version: Deno.version, build: Deno.build },
+                        baseDir,
+                        encryptInternalMetadata,
+                        directoryExistsBeforeWatch,
+                        stage,
+                        elapsedMs: Date.now() - startedAt,
+                        error: String(error),
+                        peers: hub.peers.map((peer) => ({ type: peer.config.type, health: peer.health() })),
+                        pendingHubDispatches,
+                        selectedWriteLocks: [".claude/settings.json", ".claude/remote.json"].map((path) => ({
+                            path, locked: isLockAcquired(join(basePath, path)),
+                        })),
+                        nativeEvents: nativeEvents.slice(-200),
+                        hubRoutes: hubRoutes.slice(-200),
+                        remoteChanges: remoteChanges.slice(-100).map((change) => ({
+                            id: change.id ?? change._id ?? change.doc?._id,
+                            path: change.path ?? change.doc?.path,
+                        })),
+                        local: await capture(async () => ({
+                            selected: await readStorageFile(".claude/settings.json"),
+                            remoteSelected: await readStorageFile(".claude/remote.json"),
+                            ordinary: await readStorageFile("note.md"),
+                        })),
+                        remote: await capture(async () => {
+                            if (!writer) return "Writer not initialised";
+                            const paths = [internalPath, remoteHiddenPath, internalAlias, remoteHiddenAlias];
+                            const ids = await Promise.all(paths.map((path) => writer!.path2id(path)));
+                            return {
+                                paths,
+                                ids,
+                                rows: await readDocuments(database, ids),
+                                selected: await readWriterText(writer, internalPath),
+                                remoteSelected: await readWriterText(writer, remoteHiddenPath),
+                            };
+                        }),
+                    }));
+                    throw error;
                 } finally {
+                    Deno.watchFs = originalWatchFs;
                     if (changeFeed && remoteChangeListener) {
                         if (changeFeed.off) {
                             changeFeed.off("change", remoteChangeListener);

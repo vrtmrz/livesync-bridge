@@ -1,6 +1,7 @@
 import chokidar from "chokidar";
 import { basename, join } from "@std/path";
 import { LOG_LEVEL_NOTICE } from "octagonal-wheels/common/logger";
+import { serialized } from "octagonal-wheels/concurrency/lock";
 import { PeerStorage } from "./PeerStorage.ts";
 import type { FileData, PeerStorageConf } from "./types.ts";
 
@@ -1433,6 +1434,196 @@ Deno.test("PeerStorage parent removal excludes ignored children received from an
         Deno.watchFs = originalWatchFs;
         await peer.stop();
         await watching;
+        await Deno.remove(baseDir, { recursive: true });
+    }
+});
+
+Deno.test("PeerStorage imports new directory contents from child-file events", async () => {
+    const baseDir = await Deno.makeTempDir({ prefix: "peer-storage-directory-create-" });
+    const directory = join(baseDir, ".claude");
+    const { peer } = makeWritePeer(baseDir);
+    peer.config.ignore = ["**/private"];
+    const dispatched: { path: string; data: FileData | false }[] = [];
+    peer.dispatchToHub = (_source, path, data) => {
+        dispatched.push({ path, data });
+        return Promise.resolve();
+    };
+    try {
+        await Deno.mkdir(join(directory, "deep"), { recursive: true });
+        await Deno.mkdir(join(directory, "private"));
+        await Deno.mkdir(join(baseDir, ".claude-other"));
+        await Deno.writeTextFile(join(directory, "settings.json"), "selected settings");
+        await Deno.writeTextFile(join(directory, "deep", "other.json"), "nested settings");
+        await Deno.writeTextFile(join(directory, "private", "secret.json"), "ignored");
+        await Deno.writeTextFile(join(baseDir, ".claude-other", "control.json"), "unrelated");
+
+        // Directory and child-file notifications can arrive together.
+        peer.processFile({
+            kind: "create",
+            paths: [directory, join(directory, "settings.json"), join(directory, "deep", "other.json"),
+                join(directory, "private", "secret.json")],
+        });
+        await settleDenoEvents();
+
+        assertEquals(dispatched.map((event) => event.path).sort().join(","),
+            ".claude/deep/other.json,.claude/settings.json",
+            "A newly created subtree should send its files without ignored children, directories, or siblings");
+        const contents = dispatched.map((event) => {
+            assert(event.data !== false, "New files should carry content rather than deletions");
+            const data = event.data as FileData;
+            return data.data instanceof Uint8Array ? new TextDecoder().decode(data.data) : data.data.join("");
+        }).sort().join(",");
+        assertEquals(contents, "nested settings,selected settings", "Each new file should retain its content");
+        assertEquals(await Deno.readTextFile(join(directory, "private", "secret.json")), "ignored",
+            "The ignored file should remain unchanged");
+        assertEquals(await Deno.readTextFile(join(baseDir, ".claude-other", "control.json")), "unrelated",
+            "The neighbouring directory should remain unchanged");
+    } finally {
+        await Deno.remove(baseDir, { recursive: true });
+    }
+});
+
+for (const filename of ["note.md", ".claude/settings.json"]) {
+    for (const incomingChange of ["deletion", "update"] as const) {
+        Deno.test(`PeerStorage preserves an incoming ${incomingChange} while an earlier write waits | ${filename}`, async () => {
+            const baseDir = await Deno.makeTempDir({ prefix: "peer-storage-pending-write-" });
+            const path = join(baseDir, ...filename.split("/"));
+            const { peer } = makeWritePeer(baseDir);
+            const dispatched: { path: string; data: FileData | false }[] = [];
+            peer.dispatchToHub = (_source, path, data) => {
+                dispatched.push({ path, data });
+                return Promise.resolve();
+            };
+            const originalSetTimeout = globalThis.setTimeout;
+            const released = Promise.withResolvers<void>();
+            let delayEntered = false;
+            let holdNextDelay = true;
+            try {
+                assertEquals(await peer.put(filename, textFileData("received content")), true,
+                    "The incoming write should reach disk before its watcher event");
+                globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+                    const [handler, timeout, ...handlerArgs] = args;
+                    if (holdNextDelay && timeout === 250) {
+                        holdNextDelay = false;
+                        return originalSetTimeout(async () => {
+                            delayEntered = true;
+                            await released.promise;
+                            originalSetTimeout(handler, 0, ...handlerArgs);
+                        }, timeout);
+                    }
+                    return originalSetTimeout(...args);
+                }) as typeof setTimeout;
+
+                // Hold completion of the real outgoing delay. The original implementation
+                // already has its content snapshot; the incoming change completes while
+                // the task still waits. All later timers run normally.
+                await peer.dispatch(path);
+                await waitFor(() => delayEntered, "The outgoing task should enter its notification delay");
+                if (incomingChange === "deletion") {
+                    assertEquals(await peer.delete(filename), true,
+                        "The incoming deletion should complete while the write waits");
+                } else {
+                    assertEquals(await peer.put(filename, textFileData("newer received content")), true,
+                        "The newer incoming update should complete while the earlier write waits");
+                }
+                released.resolve();
+                await serialized(path, () => Promise.resolve());
+
+                if (incomingChange === "deletion") {
+                    let missing = false;
+                    try {
+                        await Deno.stat(path);
+                    } catch (error) {
+                        if (!(error instanceof Deno.errors.NotFound)) throw error;
+                        missing = true;
+                    }
+                    assert(missing, "The received deletion should leave the local file absent");
+                } else {
+                    assertEquals(await Deno.readTextFile(path), "newer received content",
+                        "The newer received content should remain on disk");
+                }
+                assertEquals(JSON.stringify(outgoingContents(dispatched)), "[]",
+                    "A queued echo must not overwrite a later received " + incomingChange);
+
+                await Deno.writeTextFile(path, "later local edit");
+                await peer.dispatch(path);
+                await serialized(path, () => Promise.resolve());
+                assertEquals(JSON.stringify(outgoingContents(dispatched)),
+                    JSON.stringify([{ path: filename, content: "later local edit" }]),
+                    "A later local edit should still reach the Hub exactly once");
+            } finally {
+                released.resolve();
+                await serialized(path, () => Promise.resolve());
+                globalThis.setTimeout = originalSetTimeout;
+                await Deno.remove(baseDir, { recursive: true });
+            }
+        });
+    }
+}
+
+function outgoingContents(events: { path: string; data: FileData | false }[]) {
+    return events.map((event) => ({
+        path: event.path,
+        content: event.data === false ? false : event.data.data instanceof Uint8Array
+            ? new TextDecoder().decode(event.data.data) : event.data.data.join(""),
+    }));
+}
+
+Deno.test("PeerStorage skips a missing file when an outgoing write starts", async () => {
+    const baseDir = await Deno.makeTempDir({ prefix: "peer-storage-missing-write-" });
+    const path = join(baseDir, "gone.md");
+    const { peer, notices } = makeWritePeer(baseDir);
+    const dispatched: { path: string; data: FileData | false }[] = [];
+    peer.dispatchToHub = (_source, path, data) => {
+        dispatched.push({ path, data });
+        return Promise.resolve();
+    };
+    try {
+        await peer.dispatch(path);
+        await serialized(path, () => Promise.resolve());
+        assertEquals(dispatched.length, 0, "A missing file must not produce an outgoing write or deletion");
+        assertEquals(notices.length, 0, "A file removed before its write task starts is an expected watcher race");
+    } finally {
+        await Deno.remove(baseDir, { recursive: true });
+    }
+});
+
+Deno.test("PeerStorage preserves data after an outgoing read fails", async () => {
+    const baseDir = await Deno.makeTempDir({ prefix: "peer-storage-failed-write-" });
+    const filename = "note.md";
+    const path = join(baseDir, filename);
+    const { peer, notices } = makeWritePeer(baseDir);
+    const dispatched: { path: string; data: FileData | false }[] = [];
+    peer.dispatchToHub = (_source, path, data) => {
+        dispatched.push({ path, data });
+        return Promise.resolve();
+    };
+    const originalGet = peer.get.bind(peer);
+    try {
+        assertEquals(await peer.put(filename, textFileData("received content")), true,
+            "The received content should exist before the simulated read failure");
+        const repeatHash = peer.cache.get(filename);
+        await Deno.writeTextFile(path, "unreadable local edit with more content");
+        assertEquals(await peer.isChanged(filename), true, "The local edit should need synchronisation before the failed read");
+        peer.get = () => Promise.reject(new Deno.errors.PermissionDenied("Simulated outgoing read failure"));
+        await peer.dispatch(path);
+        await serialized(path, () => Promise.resolve());
+        assertEquals(dispatched.length, 0, "A failed read must not send empty content or a deletion");
+        assertEquals(await Deno.readTextFile(path), "unreadable local edit with more content", "A failed read should preserve the local file");
+        assertEquals(peer.cache.get(filename), repeatHash, "A failed read should preserve the repeat cache");
+        assertEquals(await peer.isChanged(filename), true, "A failed read must leave the local edit eligible for a later offline scan");
+        assert(notices.some((message) => message.includes(filename)), "The failed read should identify its file in a notice");
+
+        peer.get = originalGet;
+        await Deno.writeTextFile(path, "later readable local edit");
+        await peer.dispatch(path);
+        await serialized(path, () => Promise.resolve());
+        assertEquals(JSON.stringify(outgoingContents(dispatched)),
+            JSON.stringify([{ path: filename, content: "later readable local edit" }]),
+            "A later readable local change should still reach the Hub");
+    } finally {
+        peer.get = originalGet;
+        await serialized(path, () => Promise.resolve());
         await Deno.remove(baseDir, { recursive: true });
     }
 });
