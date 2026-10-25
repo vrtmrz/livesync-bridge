@@ -275,11 +275,54 @@ change. The child-file-event control remains in the unit suite.
 also timed out while waiting for the first newly created selected file with
 `baseDir: "blog/"` and internal Metadata encryption disabled. Its raw filesystem
 events were not captured. CI used Deno `2.9.8` on x86_64, whereas the initial
-local validation used Deno `2.9.7` on aarch64. The local directory comparisons
-have not reproduced that timeout, so the parent-only model does not establish
-its cause, and passing local tests do not demonstrate a fix for that CI failure.
-Failure diagnostics now include the Deno version and build target as well as
-native events and Hub routes.
+local validation used Deno `2.9.7` on aarch64. A later CI run captured the
+parent-only event pattern described below, but the missing trace means the
+specific cause of run 45 remains unproven. Failure diagnostics include the Deno
+version and build target as well as native events and Hub routes.
+
+### Native watcher evidence and diagnostic coverage on 2026-10-25
+
+[CI run 50](https://github.com/vrtmrz/livesync-bridge/actions/runs/40163967310)
+confirmed that native directory-rename operations themselves succeed on both
+Windows and Linux. The raw `Deno.watchFs` streams reported directory
+paths but no moved-child event at the new path. On Windows, both ordinary and
+case-only renames failed their synchronisation assertions. After the ordinary
+rename, the bridge dispatched deletions for the old child paths but no content
+at the new paths. The case-only rename produced no child dispatches after the
+startup baseline. Linux dispatched old-child deletions for both rename cases
+but no content at the new paths. Linux comparisons using the same storage
+location before and after the internal-file change reproduced the parent-only
+result, confirming that
+this watcher limitation predates the change.
+
+The failed CouchDB end-to-end case used the native watcher, `baseDir: "blog/"`,
+`encryptInternalMetadata: true`, and a directory created after watcher startup.
+After an ordinary note had synchronised, the raw stream reported creation of
+`.claude`, with no event for `settings.json` beneath it and no Hub route for
+the selected file. The test then timed out waiting for
+`i:.claude/settings.json`. This establishes the parent-only event pattern for
+that CI run. Earlier runs without captured raw events remain unproven at the
+individual-run level.
+
+The known native cases remain available as manual diagnostics with their
+original operations and assertions. `deno task test:watcher` retains stable
+native cases, Chokidar coverage, and independent recursive-removal coverage.
+`deno task test:watcher:diagnostic` runs native first writes in newly created
+directories, including deep paths, and ordinary and case-only directory renames.
+`deno task test:integration` runs the standard CouchDB integration suite, while
+`deno task test:e2e:diagnostic` runs the native end-to-end cases
+that create a selected directory after watcher startup across the configured
+base-directory and encryption conditions. The diagnostic tasks execute these
+tests and return a non-zero exit status when assertions fail. The standard
+tasks report the diagnostic cases as ignored.
+
+The manual workflow at
+[`.github/workflows/watcher-native-diagnostics.yml`](../../.github/workflows/watcher-native-diagnostics.yml)
+runs native watcher diagnostics on Windows and Linux and the CouchDB
+end-to-end diagnostics on Linux. GitHub can dispatch it after the workflow is
+present on the default branch. The existing manual
+[watcher rename probe](../../.github/workflows/watcher-rename-probe.yml)
+remains available for its focused check.
 
 The reporter's existing Vault and a real Obsidian client's application of
 bridge-produced hidden-file changes remain unverified. The collision check is

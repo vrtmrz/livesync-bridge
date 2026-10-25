@@ -13,8 +13,16 @@ pins published Commonlib `0.2.0`, which exposes and propagates the required
 `syncInternalFiles` option. Initial consumer validation passed on 2026-10-24.
 Further native-watcher tests exposed stale writes after incoming changes; those
 regressions pass locally after changing delayed writes to read current content.
-The cause of an initial CI creation timeout remains unresolved; a parent-only
-notification sequence has not been established. The companion
+CI run 50 also confirmed existing limitations in the default `Deno.watchFs`
+backend. Ordinary and case-only directory rename operations succeeded on Linux
+and Windows, but the raw streams contained directory events without events for
+moved children at their new paths. A CouchDB end-to-end case that created
+`.claude` after watcher startup received the parent-directory create event but
+no `settings.json` event or Hub route, and timed out waiting for
+`i:.claude/settings.json`. A similar parent-only stream was reproduced on Linux
+with the pre-change implementation, so this is an existing native-watcher
+limitation outside the internal-file routing decision. CI run 45 did not retain
+raw events, so its specific cause remains unproven. The companion
 [design document](../design_docs/internal_file_synchronisation.md) defines the
 path rules, compatibility effects, current verification results, and remaining
 runtime limits.

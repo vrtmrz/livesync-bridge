@@ -13,6 +13,7 @@ import { DirectFileManipulator } from "@vrtmrz/livesync-commonlib";
 import { getDocData } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import { decodeBinary } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/convert";
 import { isLockAcquired } from "octagonal-wheels/concurrency/lock";
+import { watcherTest } from "./watcherTest.ts";
 
 const couchDbUrl = Deno.env.get("COUCHDB_URL") ?? "http://127.0.0.1:5989";
 const authorization = `Basic ${btoa(`${Deno.env.get("COUCHDB_USERNAME") ?? "admin"}:${Deno.env.get("COUCHDB_PASSWORD") ?? "testpassword"}`)}`;
@@ -68,7 +69,7 @@ function couchConfig(name: string, database: string): PeerCouchDBConf {
 }
 
 for (const parentOnly of [false, true]) {
-    Deno.test(`Storage deletion reaches CouchDB with ${parentOnly ? "parent-only" : "native"} watcher events`, async () => {
+    watcherTest("standard", `Storage deletion reaches CouchDB with ${parentOnly ? "parent-only" : "native"} watcher events`, async () => {
         const suffix = crypto.randomUUID().replaceAll("-", "");
         const database = `livesync_bridge_storage_${suffix}`;
         const baseDir = await Deno.makeTempDir({ prefix: "bridge-storage-e2e-" });
@@ -213,7 +214,8 @@ const watcherScenarios = [
 for (const baseDir of ["", "blog/"]) {
     for (const { encryptInternalMetadata, directoryExistsBeforeWatch, useChokidar } of watcherScenarios) {
         const backend = useChokidar ? "Chokidar" : "Native";
-        Deno.test(
+        watcherTest(
+            !useChokidar && !directoryExistsBeforeWatch ? "diagnostic" : "standard",
             backend + " watcher synchronises selected hidden files | baseDir: " +
                 (baseDir || "empty") + " | encrypted metadata: " + encryptInternalMetadata +
                 " | directory: " + (directoryExistsBeforeWatch ? "pre-existing" : "newly created"),

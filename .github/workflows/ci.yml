@@ -35,7 +35,7 @@ jobs:
       - name: Start CouchDB
         run: docker compose -f test/integration/compose.yml up --detach --wait
 
-      - name: Test CouchDB integration
+      - name: Test standard CouchDB integration
         run: deno task test:integration
 
       - name: Stop CouchDB
@@ -67,5 +67,5 @@ jobs:
       - name: Install dependencies
         run: deno install --frozen
 
-      - name: Compare filesystem watchers
+      - name: Test standard filesystem watcher behaviour
         run: deno task test:watcher --filter "${{ matrix.backend }}"

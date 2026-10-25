@@ -5,9 +5,11 @@
         "lint": "deno lint",
         "run": "deno run -A main.ts",
         "test": "deno test -A",
-        "test:integration": "deno test -A test/integration/PeerCouchDB.integration.ts test/integration/PeerStorage.e2e.ts",
-        "test:e2e": "deno test -A test/integration/PeerStorage.e2e.ts",
-        "test:watcher": "deno test -A test/integration/PeerStorage.watcher.ts",
+        "test:integration": "BRIDGE_WATCHER_TEST_SUITE=standard deno test -A test/integration/PeerCouchDB.integration.ts test/integration/PeerStorage.e2e.ts",
+        "test:e2e": "BRIDGE_WATCHER_TEST_SUITE=standard deno test -A test/integration/PeerStorage.e2e.ts",
+        "test:watcher": "BRIDGE_WATCHER_TEST_SUITE=standard deno test -A test/integration/PeerStorage.watcher.ts",
+        "test:e2e:diagnostic": "BRIDGE_WATCHER_TEST_SUITE=diagnostic deno test -A test/integration/PeerStorage.e2e.ts",
+        "test:watcher:diagnostic": "BRIDGE_WATCHER_TEST_SUITE=diagnostic deno test -A test/integration/PeerStorage.watcher.ts",
         "probe:watcher-rename": "deno run -A test/integration/WatcherRename.probe.mjs"
     },
     "imports": {

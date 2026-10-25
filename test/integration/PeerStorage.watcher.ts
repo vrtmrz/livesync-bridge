@@ -1,6 +1,7 @@
 import { join, relative } from "@std/path";
 import { PeerStorage } from "../../PeerStorage.ts";
 import type { FileData, PeerStorageConf } from "../../types.ts";
+import { watcherTest } from "./watcherTest.ts";
 
 type Dispatch = {
   path: string;
@@ -479,14 +480,18 @@ for (const backend of WATCHERS) {
     !useChokidarPolling;
 
   for (const preExistingDirectory of [false, true]) {
-    Deno.test(
+    watcherTest(
+      !backend.useChokidar && !preExistingDirectory ? "diagnostic" : "standard",
       `PeerStorage ${backend.name} sees a first child write in a ${
         preExistingDirectory ? "pre-existing" : "new"
       } .claude directory`,
       async () => {
         await withHarness(
           backend.useChokidar,
-          { scanOfflineChanges: false },
+          {
+            scanOfflineChanges: false,
+            traceNativeEvents: !preExistingDirectory,
+          },
           async (harness, baseDir) => {
             const directory = join(baseDir, ".claude");
             if (preExistingDirectory) {
@@ -517,63 +522,68 @@ for (const backend of WATCHERS) {
     );
   }
 
-  Deno.test(`PeerStorage ${backend.name} dispatches edits, empty content, deletion, and ignores its subtree`, async () => {
-    await withHarness(
-      backend.useChokidar,
-      { scanOfflineChanges: false, ignore: ["ignored/**"] },
-      async (harness, baseDir) => {
-        const path = join(baseDir, "note.md");
-        const ignoredDirectory = join(baseDir, "ignored");
-        await Deno.mkdir(ignoredDirectory, { recursive: true });
-        await startAndWait(harness);
+  watcherTest(
+    "standard",
+    `PeerStorage ${backend.name} dispatches edits, empty content, deletion, and ignores its subtree`,
+    async () => {
+      await withHarness(
+        backend.useChokidar,
+        { scanOfflineChanges: false, ignore: ["ignored/**"] },
+        async (harness, baseDir) => {
+          const path = join(baseDir, "note.md");
+          const ignoredDirectory = join(baseDir, "ignored");
+          await Deno.mkdir(ignoredDirectory, { recursive: true });
+          await startAndWait(harness);
 
-        await Deno.writeTextFile(path, "first");
-        await expectDispatchesOnce(harness, [{
-          path: "note.md",
-          data: textFileData("first"),
-        }], "initial local write");
+          await Deno.writeTextFile(path, "first");
+          await expectDispatchesOnce(harness, [{
+            path: "note.md",
+            data: textFileData("first"),
+          }], "initial local write");
 
-        await Deno.writeTextFile(path, "modified");
-        await expectDispatchesOnce(harness, [{
-          path: "note.md",
-          data: textFileData("modified"),
-        }], "file modification");
+          await Deno.writeTextFile(path, "modified");
+          await expectDispatchesOnce(harness, [{
+            path: "note.md",
+            data: textFileData("modified"),
+          }], "file modification");
 
-        const duplicateStart = harness.dispatches.length;
-        await Deno.writeTextFile(path, "modified");
-        await expectQuiet(
-          harness,
-          "duplicate content write",
-          ["note.md"],
-          duplicateStart,
-        );
+          const duplicateStart = harness.dispatches.length;
+          await Deno.writeTextFile(path, "modified");
+          await expectQuiet(
+            harness,
+            "duplicate content write",
+            ["note.md"],
+            duplicateStart,
+          );
 
-        await Deno.writeTextFile(path, "");
-        await expectDispatchesOnce(harness, [{
-          path: "note.md",
-          data: textFileData(""),
-        }], "intentional empty update");
+          await Deno.writeTextFile(path, "");
+          await expectDispatchesOnce(harness, [{
+            path: "note.md",
+            data: textFileData(""),
+          }], "intentional empty update");
 
-        await Deno.remove(path);
-        await expectDispatchesOnce(
-          harness,
-          [{ path: "note.md", data: false }],
-          "file deletion",
-        );
+          await Deno.remove(path);
+          await expectDispatchesOnce(
+            harness,
+            [{ path: "note.md", data: false }],
+            "file deletion",
+          );
 
-        const ignoredStart = harness.dispatches.length;
-        await Deno.writeTextFile(
-          join(ignoredDirectory, "secret.md"),
-          "local only",
-        );
-        await expectQuiet(harness, "ignored subtree write", [
-          "ignored/secret.md",
-        ], ignoredStart);
-      },
-    );
-  });
+          const ignoredStart = harness.dispatches.length;
+          await Deno.writeTextFile(
+            join(ignoredDirectory, "secret.md"),
+            "local only",
+          );
+          await expectQuiet(harness, "ignored subtree write", [
+            "ignored/secret.md",
+          ], ignoredStart);
+        },
+      );
+    },
+  );
 
-  Deno.test(
+  watcherTest(
+    "standard",
     "PeerStorage " + backend.name + " dispatches binary payloads byte-for-byte",
     async () => {
       await withHarness(
@@ -603,7 +613,8 @@ for (const backend of WATCHERS) {
     },
   );
 
-  Deno.test(
+  watcherTest(
+    "standard",
     "PeerStorage " + backend.name +
       " reports an atomic replacement as a final file update",
     async () => {
@@ -668,119 +679,145 @@ for (const backend of WATCHERS) {
     },
   );
 
-  Deno.test(`PeerStorage ${backend.name} suppresses received changes and resumes after restart`, async () => {
-    await withHarness(
-      backend.useChokidar,
-      { scanOfflineChanges: false },
-      async (harness, baseDir) => {
-        await startAndWait(harness);
-
-        const receivedPath = "remote.md";
-        const putStart = harness.dispatches.length;
-        assert(
-          await harness.peer.put(receivedPath, textFileData("from peer")),
-          "Received put should write the file",
-        );
-        await expectQuiet(
-          harness,
-          "received put echo",
-          [receivedPath],
-          putStart,
-        );
-
-        const deleteStart = harness.dispatches.length;
-        assert(
-          await harness.peer.delete(receivedPath),
-          "Received delete should remove the file",
-        );
-        await expectQuiet(
-          harness,
-          "received delete echo",
-          [receivedPath],
-          deleteStart,
-        );
-
-        await Deno.writeTextFile(join(baseDir, receivedPath), "edited locally");
-        await expectDispatchesOnce(
-          harness,
-          [{ path: receivedPath, data: textFileData("edited locally") }],
-          "local edit after received changes",
-        );
-
-        await stopAndWait(harness);
-        const restartPath = join(baseDir, "restart.md");
-        await Deno.writeTextFile(restartPath, "written while stopped");
-        await startAndWait(harness);
-        const restartStart = harness.dispatches.length;
-        await expectQuiet(harness, "restart with offline scan disabled", [
-          "restart.md",
-        ], restartStart);
-
-        await Deno.writeTextFile(restartPath, "edited after restart");
-        await expectDispatchesOnce(
-          harness,
-          [{ path: "restart.md", data: textFileData("edited after restart") }],
-          "local edit after restart",
-        );
-      },
-    );
-  });
-
-  Deno.test(`PeerStorage ${backend.name} emits startup files only when offline scanning is enabled`, async () => {
-    for (const scanOfflineChanges of [false, true]) {
+  watcherTest(
+    "standard",
+    `PeerStorage ${backend.name} suppresses received changes and resumes after restart`,
+    async () => {
       await withHarness(
         backend.useChokidar,
-        { scanOfflineChanges },
+        { scanOfflineChanges: false },
         async (harness, baseDir) => {
-          await Deno.writeTextFile(
-            join(baseDir, "offline.md"),
-            "already present",
+          await startAndWait(harness);
+
+          const receivedPath = "remote.md";
+          const putStart = harness.dispatches.length;
+          assert(
+            await harness.peer.put(receivedPath, textFileData("from peer")),
+            "Received put should write the file",
           );
-          await startAndWait(harness);
-          if (scanOfflineChanges) {
-            await expectDispatchesOnce(
-              harness,
-              [{ path: "offline.md", data: textFileData("already present") }],
-              "offline scan enabled",
-            );
-          } else {
-            await expectQuiet(harness, "offline scan disabled", ["offline.md"]);
-          }
-        },
-      );
-    }
-  });
+          await expectQuiet(
+            harness,
+            "received put echo",
+            [receivedPath],
+            putStart,
+          );
 
-  Deno.test(`PeerStorage ${backend.name} preserves deep paths with spaces and Japanese names for both baseDir forms`, async () => {
-    for (const relativeBaseDir of [false, true]) {
-      await withHarness(
-        backend.useChokidar,
-        { scanOfflineChanges: false, traceNativeEvents: true },
-        async (harness, baseDir) => {
-          await startAndWait(harness);
-          const directory = join(baseDir, "deep path", "日本語", "さらに深く");
-          traceStage(harness, "deep directory creation requested");
-          await Deno.mkdir(directory, { recursive: true });
-          traceStage(harness, "deep directory creation completed");
-          const filename = "note with spaces_日本語.md";
-          const path = "deep path/日本語/さらに深く/note with spaces_日本語.md";
-          traceStage(harness, "first deep file write requested");
-          await Deno.writeTextFile(join(directory, filename), "日本語の内容");
-          traceStage(harness, "first deep file write completed");
+          const deleteStart = harness.dispatches.length;
+          assert(
+            await harness.peer.delete(receivedPath),
+            "Received delete should remove the file",
+          );
+          await expectQuiet(
+            harness,
+            "received delete echo",
+            [receivedPath],
+            deleteStart,
+          );
+
+          await Deno.writeTextFile(
+            join(baseDir, receivedPath),
+            "edited locally",
+          );
           await expectDispatchesOnce(
             harness,
-            [{ path, data: textFileData("日本語の内容") }],
-            relativeBaseDir
-              ? "deep path with relative baseDir"
-              : "deep path with absolute baseDir",
+            [{ path: receivedPath, data: textFileData("edited locally") }],
+            "local edit after received changes",
+          );
+
+          await stopAndWait(harness);
+          const restartPath = join(baseDir, "restart.md");
+          await Deno.writeTextFile(restartPath, "written while stopped");
+          await startAndWait(harness);
+          const restartStart = harness.dispatches.length;
+          await expectQuiet(harness, "restart with offline scan disabled", [
+            "restart.md",
+          ], restartStart);
+
+          await Deno.writeTextFile(restartPath, "edited after restart");
+          await expectDispatchesOnce(
+            harness,
+            [{
+              path: "restart.md",
+              data: textFileData("edited after restart"),
+            }],
+            "local edit after restart",
           );
         },
-        relativeBaseDir,
       );
-    }
-  });
+    },
+  );
 
-  Deno.test({
+  watcherTest(
+    "standard",
+    `PeerStorage ${backend.name} emits startup files only when offline scanning is enabled`,
+    async () => {
+      for (const scanOfflineChanges of [false, true]) {
+        await withHarness(
+          backend.useChokidar,
+          { scanOfflineChanges },
+          async (harness, baseDir) => {
+            await Deno.writeTextFile(
+              join(baseDir, "offline.md"),
+              "already present",
+            );
+            await startAndWait(harness);
+            if (scanOfflineChanges) {
+              await expectDispatchesOnce(
+                harness,
+                [{ path: "offline.md", data: textFileData("already present") }],
+                "offline scan enabled",
+              );
+            } else {
+              await expectQuiet(harness, "offline scan disabled", [
+                "offline.md",
+              ]);
+            }
+          },
+        );
+      }
+    },
+  );
+
+  watcherTest(
+    backend.useChokidar ? "standard" : "diagnostic",
+    `PeerStorage ${backend.name} preserves deep paths with spaces and Japanese names for both baseDir forms`,
+    async () => {
+      for (const relativeBaseDir of [false, true]) {
+        await withHarness(
+          backend.useChokidar,
+          { scanOfflineChanges: false, traceNativeEvents: true },
+          async (harness, baseDir) => {
+            await startAndWait(harness);
+            const directory = join(
+              baseDir,
+              "deep path",
+              "日本語",
+              "さらに深く",
+            );
+            traceStage(harness, "deep directory creation requested");
+            await Deno.mkdir(directory, { recursive: true });
+            traceStage(harness, "deep directory creation completed");
+            const filename = "note with spaces_日本語.md";
+            const path =
+              "deep path/日本語/さらに深く/note with spaces_日本語.md";
+            traceStage(harness, "first deep file write requested");
+            await Deno.writeTextFile(join(directory, filename), "日本語の内容");
+            traceStage(harness, "first deep file write completed");
+            await expectDispatchesOnce(
+              harness,
+              [{ path, data: textFileData("日本語の内容") }],
+              relativeBaseDir
+                ? "deep path with relative baseDir"
+                : "deep path with absolute baseDir",
+            );
+          },
+          relativeBaseDir,
+        );
+      }
+    },
+  );
+
+  watcherTest(backend.useChokidar ? "standard" : "diagnostic", {
     name: "PeerStorage " + backend.name +
       " reports case-only folder renames with exact paths",
     ignore: skipFolderRename,
@@ -892,7 +929,7 @@ for (const backend of WATCHERS) {
     },
   });
 
-  Deno.test({
+  watcherTest(backend.useChokidar ? "standard" : "diagnostic", {
     name:
       `PeerStorage ${backend.name} tracks a moved folder and recursively removed children`,
     ignore: skipFolderRename,
@@ -964,7 +1001,8 @@ for (const backend of WATCHERS) {
     },
   });
 
-  Deno.test(
+  watcherTest(
+    "standard",
     `PeerStorage ${backend.name} reports recursively removed children without a folder rename`,
     async () => {
       await withHarness(

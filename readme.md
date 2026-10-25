@@ -203,9 +203,14 @@ for the polling intervals and other trade-offs.
 
 See the [upstream Chokidar report](https://github.com/paulmillr/chokidar/issues/1380)
 and Microsoft's [directory rename constraints](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information).
-The bridge also has folder-rename handling limitations with the default
-`Deno.watchFs` backend; switching backends does not establish that child-file
-changes will be synchronised after a folder rename.
+The default `Deno.watchFs` backend can report a directory being created or
+renamed without reporting changes to files inside it. A file written
+immediately after its directory is created, or a child file at its new path
+after an ordinary or case-only directory rename, can therefore be missed while the
+bridge is running. These behaviours were reproducible on Linux before the
+internal-file synchronisation change. Switching to Chokidar does not guarantee
+that all child-event gaps are resolved; its Windows directory-rename
+restriction is described above.
 
 ## Vaults with an ID key
 
