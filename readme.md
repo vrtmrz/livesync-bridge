@@ -126,7 +126,9 @@ so the next offline scan must rebuild the state.
 
 # Configuration
 
-The configuration file consists of the following structure.
+The configuration file consists of the following structure. The basic example
+below leaves hidden-file synchronisation disabled. To opt in, see
+[Synchronising internal/hidden files](#synchronising-internalhidden-files).
 
 ```jsonc
 {
@@ -145,7 +147,6 @@ The configuration file consists of the following structure.
       "obfuscatePassphrase": "passphrase", // Path obfuscation passphrase. Leave blank to disable it; this may differ from passphrase.
       "idDerivationKey": "sls-id-v1:...", // ID key of the vault, if it uses one (see below). Omit it otherwise.
       "baseDir": "blog/", // Sharing folder
-      "includeInternal": [".claude/**"], // Opt-in glob patterns for internal/hidden files (see caution below). Omit to keep the default of skipping them.
       "useRemoteTweaks":true // Overwrite customChunkSize or minimumChunkSize, and check configuration matches
     },
     {
@@ -205,15 +206,18 @@ With a key configured, the bridge uses ID derivation version 1 unless `idDerivat
 
 This bidirectional routing change remains unreleased.
 
-By default, the bridge skips Self-hosted LiveSync's internal documents, stored
-with an `i:` prefix. The optional `includeInternal` field selects hidden files
-whose first Vault-root path component begins with a dot, such as
-`.claude/settings.json` or `.settings.json`. An omitted or empty list selects
-no internal files.
+Hidden-file synchronisation is optional and disabled by default. For each
+CouchDB peer, `includeInternal` enables synchronisation only for matching hidden
+files, in both directions. Omit the field or use `[]` to keep it disabled.
 
-It takes an array of [minimatch](https://github.com/isaacs/minimatch) glob
-patterns matched against the complete Vault-root path after removing the `i:`
-prefix:
+Self-hosted LiveSync stores internal documents with an `i:` prefix. The bridge
+supports hidden files whose first Vault-root path component begins with a dot,
+such as `.claude/settings.json` or `.settings.json`.
+
+Set `includeInternal` to an array of
+[minimatch](https://github.com/isaacs/minimatch) glob patterns matched against the
+complete Vault-root path after removing the `i:` prefix. The following example
+enables synchronisation for `.claude/` only:
 
 ```jsonc
 {
@@ -238,9 +242,11 @@ peer's root. Local creation, edits, and deletion use that same internal document
 on the return route, including after restart.
 
 Each CouchDB peer applies its own `includeInternal` patterns in both directions.
-Opting one peer in does not enable another peer. An excluded hidden file has no
-ordinary fallback route. Storage peers' sending exclusions remain separate;
-see [Excluding paths from a storage peer](#excluding-paths-from-a-storage-peer).
+Opting one peer in does not enable another peer. Each Obsidian client that
+should synchronise these files also needs hidden-file synchronisation enabled
+in its own LiveSync settings. An excluded hidden file has no ordinary fallback
+route. Storage peers' sending exclusions remain separate; see
+[Excluding paths from a storage peer](#excluding-paths-from-a-storage-peer).
 
 On CouchDB peers, shared paths beginning with a dot are reserved for this
 internal route. Ordinary documents such as `blog/.claude/settings.json` are
