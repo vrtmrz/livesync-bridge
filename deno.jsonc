@@ -7,7 +7,8 @@
         "test": "deno test -A",
         "test:integration": "deno test -A test/integration/PeerCouchDB.integration.ts test/integration/PeerStorage.e2e.ts",
         "test:e2e": "deno test -A test/integration/PeerStorage.e2e.ts",
-        "test:watcher": "deno test -A test/integration/PeerStorage.watcher.ts"
+        "test:watcher": "deno test -A test/integration/PeerStorage.watcher.ts",
+        "probe:watcher-rename": "deno run -A test/integration/WatcherRename.probe.mjs"
     },
     "imports": {
         "@vrtmrz/livesync-commonlib": "npm:@vrtmrz/livesync-commonlib@0.2.0",
