@@ -1,4 +1,5 @@
 import { join, relative, resolve, SEPARATOR } from "@std/path";
+import chokidar from "chokidar";
 import {
     MILESTONE_DOCID,
     TweakValuesTemplate,
@@ -202,15 +203,18 @@ for (const parentOnly of [false, true]) {
         }
     });
 }
+const watcherScenarios = [
+    { encryptInternalMetadata: false, directoryExistsBeforeWatch: false },
+    { encryptInternalMetadata: true, directoryExistsBeforeWatch: false },
+    { encryptInternalMetadata: false, directoryExistsBeforeWatch: true },
+    { encryptInternalMetadata: true, directoryExistsBeforeWatch: true },
+].flatMap((scenario) => [false, true].map((useChokidar) => ({ ...scenario, useChokidar })));
+
 for (const baseDir of ["", "blog/"]) {
-    for (const { encryptInternalMetadata, directoryExistsBeforeWatch } of [
-        { encryptInternalMetadata: false, directoryExistsBeforeWatch: false },
-        { encryptInternalMetadata: true, directoryExistsBeforeWatch: false },
-        { encryptInternalMetadata: false, directoryExistsBeforeWatch: true },
-        { encryptInternalMetadata: true, directoryExistsBeforeWatch: true },
-    ]) {
+    for (const { encryptInternalMetadata, directoryExistsBeforeWatch, useChokidar } of watcherScenarios) {
+        const backend = useChokidar ? "Chokidar" : "Native";
         Deno.test(
-            "Native watcher synchronises selected hidden files | baseDir: " +
+            backend + " watcher synchronises selected hidden files | baseDir: " +
                 (baseDir || "empty") + " | encrypted metadata: " + encryptInternalMetadata +
                 " | directory: " + (directoryExistsBeforeWatch ? "pre-existing" : "newly created"),
             async () => {
@@ -229,7 +233,7 @@ for (const baseDir of ["", "blog/"]) {
                     name: "watcher-storage-" + suffix,
                     baseDir: basePath + "/",
                     scanOfflineChanges: false,
-                    useChokidar: false,
+                    useChokidar,
                 };
                 const hub = new Hub({ peers: [remoteConfig, storageConfig] });
                 let writer: DirectFileManipulator | undefined;
@@ -249,7 +253,7 @@ for (const baseDir of ["", "blog/"]) {
                 const startedAt = Date.now();
                 let stage = "setup";
                 let pendingHubDispatches = 0;
-                let lastNativeEventAt = startedAt;
+                let lastWatcherEventAt = startedAt;
                 const nativeEvents: Array<{ elapsedMs: number; kind: string; paths: string[] }> = [];
                 const hubRoutes: Array<{
                     elapsedMs: number;
@@ -258,28 +262,49 @@ for (const baseDir of ["", "blog/"]) {
                     path: string;
                     content: string | false;
                 }> = [];
+                const originalChokidarWatch = chokidar.watch;
+                let chokidarReady = false;
+                const chokidarEvents: Array<{ elapsedMs: number; kind: string; path: string }> = [];
+                if (useChokidar) {
+                    // Observe the real backend without changing its event stream or options.
+                    chokidar.watch = ((...args: Parameters<typeof chokidar.watch>) => {
+                        const watcher = originalChokidarWatch(...args);
+                        watcher.once("ready", () => { chokidarReady = true; });
+                        watcher.on("all", (kind, path) => {
+                            lastWatcherEventAt = Date.now();
+                            chokidarEvents.push({
+                                elapsedMs: lastWatcherEventAt - startedAt,
+                                kind,
+                                path: relative(basePath, path),
+                            });
+                        });
+                        return watcher;
+                    }) as typeof chokidar.watch;
+                }
                 const originalWatchFs = Deno.watchFs;
-                Deno.watchFs = ((...args: Parameters<typeof Deno.watchFs>) => {
-                    const watcher = originalWatchFs(...args);
-                    const iterator = watcher[Symbol.asyncIterator]();
-                    return {
-                        async next() {
-                            const result = await iterator.next();
-                            if (!result.done) {
-                                lastNativeEventAt = Date.now();
-                                nativeEvents.push({
-                                    elapsedMs: lastNativeEventAt - startedAt,
-                                    kind: result.value.kind,
-                                    paths: result.value.paths.map((path) => relative(basePath, path)),
-                                });
-                            }
-                            return result;
-                        },
-                        [Symbol.asyncIterator]() { return this; },
-                        close: () => watcher.close(),
-                        [Symbol.dispose]: () => watcher.close(),
-                    } as unknown as Deno.FsWatcher;
-                }) as typeof Deno.watchFs;
+                if (!useChokidar) {
+                    Deno.watchFs = ((...args: Parameters<typeof Deno.watchFs>) => {
+                        const watcher = originalWatchFs(...args);
+                        const iterator = watcher[Symbol.asyncIterator]();
+                        return {
+                            async next() {
+                                const result = await iterator.next();
+                                if (!result.done) {
+                                    lastWatcherEventAt = Date.now();
+                                    nativeEvents.push({
+                                        elapsedMs: lastWatcherEventAt - startedAt,
+                                        kind: result.value.kind,
+                                        paths: result.value.paths.map((path) => relative(basePath, path)),
+                                    });
+                                }
+                                return result;
+                            },
+                            [Symbol.asyncIterator]() { return this; },
+                            close: () => watcher.close(),
+                            [Symbol.dispose]: () => watcher.close(),
+                        } as unknown as Deno.FsWatcher;
+                    }) as typeof Deno.watchFs;
+                }
                 const originalDispatch = hub.dispatch.bind(hub);
                 hub.dispatch = async (source, path, data) => {
                     const route = {
@@ -303,11 +328,11 @@ for (const baseDir of ["", "blog/"]) {
                 };
                 const waitForWatcherWork = async () => {
                     await waitFor(
-                        () => Date.now() - lastNativeEventAt >= 500 && pendingHubDispatches === 0 &&
+                        () => Date.now() - lastWatcherEventAt >= 500 && pendingHubDispatches === 0 &&
                             [".claude/settings.json", ".claude/remote.json", "note.md"].every((path) =>
                                 !isLockAcquired(join(basePath, path))
                             ),
-                        "Native events, queued selected writes, and Hub dispatches should settle",
+                        "Filesystem events, queued selected writes, and Hub dispatches should settle",
                     );
                 };
 
@@ -448,7 +473,7 @@ for (const baseDir of ["", "blog/"]) {
                                 ? new TextDecoder().decode(event.data.data)
                                 : event.data.data.join("")) === content
                         ),
-                        "The native watcher should finish routing the local excluded write",
+                        "The filesystem watcher should finish routing the local excluded write",
                     );
                 };
                 const removeLocalExcludedAndWait = async (after: number) => {
@@ -459,7 +484,7 @@ for (const baseDir of ["", "blog/"]) {
                             event.path === ".obsidian/app.json" &&
                             event.data === false
                         ),
-                        "The native watcher should finish routing the local excluded deletion",
+                        "The filesystem watcher should finish routing the local excluded deletion",
                     );
                 };
 
@@ -528,8 +553,9 @@ for (const baseDir of ["", "blog/"]) {
                     }
 
                     await waitFor(
-                        () => hub.peers.length === 2 && hub.peers.every((peer) => peer.health().ok),
-                        "The real CouchDB and Deno filesystem watcher peers should become ready",
+                        () => hub.peers.length === 2 && hub.peers.every((peer) => peer.health().ok) &&
+                            (!useChokidar || chokidarReady),
+                        "The real CouchDB and filesystem watcher peers should become ready",
                     );
                     assert(
                         remote.config.encryptInternalMetadata === encryptInternalMetadata,
@@ -701,8 +727,11 @@ for (const baseDir of ["", "blog/"]) {
                             return { error: String(snapshotError) };
                         }
                     };
-                    console.error("Native watcher failure diagnostics " + JSON.stringify({
+                    console.error(backend + " watcher failure diagnostics " + JSON.stringify({
                         runtime: { version: Deno.version, build: Deno.build },
+                        backend,
+                        chokidarReady,
+                        chokidarEvents: chokidarEvents.slice(-200),
                         baseDir,
                         encryptInternalMetadata,
                         directoryExistsBeforeWatch,
@@ -740,6 +769,7 @@ for (const baseDir of ["", "blog/"]) {
                     }));
                     throw error;
                 } finally {
+                    chokidar.watch = originalChokidarWatch;
                     Deno.watchFs = originalWatchFs;
                     if (changeFeed && remoteChangeListener) {
                         if (changeFeed.off) {
