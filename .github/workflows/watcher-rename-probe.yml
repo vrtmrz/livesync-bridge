@@ -1,0 +1,48 @@
+name: Windows watcher rename diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watcher-rename-probe:
+    name: Windows watcher rename (${{ matrix.runtime }})
+    runs-on: windows-2025
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [deno, node]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.8
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.18.0'
+          package-manager-cache: false
+
+      - name: Runtime versions
+        run: |
+          deno --version
+          node --version
+
+      - name: Install the locked dependencies
+        run: deno install --frozen
+
+      - name: Probe renames with Deno
+        if: matrix.runtime == 'deno'
+        run: deno task probe:watcher-rename
+
+      - name: Probe renames with Node
+        if: matrix.runtime == 'node'
+        run: node test/integration/WatcherRename.probe.mjs

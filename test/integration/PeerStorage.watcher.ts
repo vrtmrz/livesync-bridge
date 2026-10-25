@@ -7,17 +7,30 @@ type Dispatch = {
   data: FileData | false;
 };
 
+type TraceEvent =
+  | { type: "stage" }
+  | { type: "native"; kind: string; paths: string[]; relativePaths: string[] }
+  | { type: "dispatch"; path: string; content: string | false };
+
+type WatcherTrace = {
+  startedAt: number;
+  stage: string;
+  events: Array<TraceEvent & { elapsedMs: number; stage: string }>;
+};
+
 type Harness = {
   peer: PeerStorage;
   useChokidar: boolean;
   dispatches: Dispatch[];
   startFailures: unknown[];
   startPromises: Promise<void>[];
+  trace?: WatcherTrace;
 };
 
 type HarnessOptions = {
   scanOfflineChanges?: boolean;
   ignore?: string[];
+  traceNativeEvents?: boolean;
 };
 
 const WATCHERS = [
@@ -56,6 +69,59 @@ function errorText(error: unknown): string {
     : String(error);
 }
 
+function recordTrace(trace: WatcherTrace | undefined, event: TraceEvent): void {
+  if (!trace) return;
+  trace.events.push({
+    ...event,
+    elapsedMs: Math.round(performance.now() - trace.startedAt),
+    stage: trace.stage,
+  });
+}
+
+function traceStage(harness: Harness, stage: string): void {
+  if (!harness.trace) return;
+  harness.trace.stage = stage;
+  recordTrace(harness.trace, { type: "stage" });
+}
+
+function observeNativeWatcher(
+  baseDir: string,
+  trace: WatcherTrace | undefined,
+): () => void {
+  if (!trace) return () => {};
+  const originalWatchFs = Deno.watchFs;
+  // Observe the iterator consumed by PeerStorage, preserving its events and options.
+  // A second watcher could affect event delivery and the behaviour under test.
+  Deno.watchFs = ((...args: Parameters<typeof Deno.watchFs>) => {
+    const watcher = originalWatchFs(...args);
+    const iterator = watcher[Symbol.asyncIterator]();
+    return {
+      async next() {
+        const result = await iterator.next();
+        if (!result.done) {
+          recordTrace(trace, {
+            type: "native",
+            kind: result.value.kind,
+            paths: [...result.value.paths],
+            relativePaths: result.value.paths.map((path) =>
+              relative(baseDir, path).replaceAll("\\", "/")
+            ),
+          });
+        }
+        return result;
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      close: () => watcher.close(),
+      [Symbol.dispose]: () => watcher.close(),
+    } as unknown as Deno.FsWatcher;
+  }) as typeof Deno.watchFs;
+  return () => {
+    Deno.watchFs = originalWatchFs;
+  };
+}
+
 function diagnostics(harness: Harness, stage: string): string {
   const events = harness.dispatches.map(({ path, data }) => ({
     path,
@@ -69,6 +135,9 @@ function diagnostics(harness: Harness, stage: string): string {
     `stage=${stage}`,
     `start failures=${JSON.stringify(failures)}`,
     `dispatches=${JSON.stringify(events)}`,
+    ...(harness.trace
+      ? [`watcher trace=${JSON.stringify(harness.trace.events)}`]
+      : []),
   ].join("\n");
 }
 
@@ -214,9 +283,14 @@ function makeHarness(
     useChokidar,
     ...(options.ignore ? { ignore: options.ignore } : {}),
   };
+  const trace: WatcherTrace | undefined =
+    !useChokidar && options.traceNativeEvents
+      ? { startedAt: performance.now(), stage: "setup", events: [] }
+      : undefined;
   const dispatches: Dispatch[] = [];
   const peer = new PeerStorage(config, (_source, path, data) => {
     dispatches.push({ path, data });
+    recordTrace(trace, { type: "dispatch", path, content: contentOf(data) });
     return Promise.resolve();
   });
   return {
@@ -225,10 +299,12 @@ function makeHarness(
     dispatches,
     startFailures: [],
     startPromises: [],
+    trace,
   };
 }
 
 async function startAndWait(harness: Harness): Promise<void> {
+  traceStage(harness, "watcher start");
   const start = harness.peer.start();
   harness.startPromises.push(start.catch((error: unknown) => {
     harness.startFailures.push(error);
@@ -240,6 +316,7 @@ async function startAndWait(harness: Harness): Promise<void> {
       () => harness.peer.health().ok,
       "Deno watcher inventory ready",
     );
+    traceStage(harness, "watcher ready");
     return;
   }
 
@@ -328,6 +405,7 @@ async function withHarness(
   );
   const baseDir = relativeBaseDir ? `./${relativePath}` : absoluteBaseDir;
   const harness = makeHarness(baseDir, useChokidar, options);
+  const restoreWatchFs = observeNativeWatcher(absoluteBaseDir, harness.trace);
   let runFailure: unknown;
   let hasRunFailure = false;
   try {
@@ -340,9 +418,16 @@ async function withHarness(
 
   const cleanupFailures: unknown[] = [];
   try {
+    traceStage(harness, "watcher stop requested");
     await stopAndWait(harness);
+    traceStage(harness, "watcher stopped");
   } catch (error) {
     cleanupFailures.push(error);
+  } finally {
+    restoreWatchFs();
+  }
+  if (harness.trace) {
+    console.log(diagnostics(harness, "watcher trace after stop"));
   }
   try {
     clearPeerSettings(harness);
@@ -382,6 +467,17 @@ function textFileData(content: string): FileData {
 }
 
 for (const backend of WATCHERS) {
+  // Windows rejects these renames with Chokidar's default event-based watching.
+  // Keep polling opt-ins testable; this follows Chokidar 3.6's environment override.
+  // See readme.md#filesystem-watcher-limitations and
+  // https://github.com/paulmillr/chokidar/issues/1380.
+  const pollingOverride = Deno.env.get("CHOKIDAR_USEPOLLING")?.toLowerCase();
+  const useChokidarPolling = ![undefined, "", "0", "false"].includes(
+    pollingOverride,
+  );
+  const skipFolderRename = Deno.build.os === "windows" && backend.useChokidar &&
+    !useChokidarPolling;
+
   for (const preExistingDirectory of [false, true]) {
     Deno.test(
       `PeerStorage ${backend.name} sees a first child write in a ${
@@ -659,14 +755,18 @@ for (const backend of WATCHERS) {
     for (const relativeBaseDir of [false, true]) {
       await withHarness(
         backend.useChokidar,
-        { scanOfflineChanges: false },
+        { scanOfflineChanges: false, traceNativeEvents: true },
         async (harness, baseDir) => {
           await startAndWait(harness);
           const directory = join(baseDir, "deep path", "日本語", "さらに深く");
+          traceStage(harness, "deep directory creation requested");
           await Deno.mkdir(directory, { recursive: true });
+          traceStage(harness, "deep directory creation completed");
           const filename = "note with spaces_日本語.md";
           const path = "deep path/日本語/さらに深く/note with spaces_日本語.md";
+          traceStage(harness, "first deep file write requested");
           await Deno.writeTextFile(join(directory, filename), "日本語の内容");
+          traceStage(harness, "first deep file write completed");
           await expectDispatchesOnce(
             harness,
             [{ path, data: textFileData("日本語の内容") }],
@@ -680,13 +780,14 @@ for (const backend of WATCHERS) {
     }
   });
 
-  Deno.test(
-    "PeerStorage " + backend.name +
+  Deno.test({
+    name: "PeerStorage " + backend.name +
       " reports case-only folder renames with exact paths",
-    async () => {
+    ignore: skipFolderRename,
+    fn: async () => {
       await withHarness(
         backend.useChokidar,
-        { scanOfflineChanges: true },
+        { scanOfflineChanges: true, traceNativeEvents: true },
         async (harness, baseDir) => {
           const oldDirectory = join(baseDir, "CaseFolder");
           const newDirectory = join(baseDir, "casefolder");
@@ -724,7 +825,9 @@ for (const backend of WATCHERS) {
           const checkpoint = harness.dispatches.length;
           // Keep this as one direct case-only rename on Windows; a second temporary
           // rename would change the filesystem operation being measured.
+          traceStage(harness, "case-only rename requested");
           await Deno.rename(oldDirectory, newDirectory);
+          traceStage(harness, "case-only rename completed");
           const expected = [
             ...files.map(({ oldPath }) => ({
               path: oldPath,
@@ -787,68 +890,117 @@ for (const backend of WATCHERS) {
         },
       );
     },
-  );
-
-  Deno.test(`PeerStorage ${backend.name} tracks a moved folder and recursively removed children`, async () => {
-    await withHarness(
-      backend.useChokidar,
-      { scanOfflineChanges: false },
-      async (harness, baseDir) => {
-        const oldDirectory = join(baseDir, "old-folder");
-        const movedDirectory = join(baseDir, "moved folder");
-        const originalFiles = [
-          { path: "old-folder/one.md", content: "one" },
-          { path: "old-folder/deep/two.md", content: "two" },
-        ];
-        const movedFiles = [
-          { path: "moved folder/one.md", content: "one" },
-          { path: "moved folder/deep/two.md", content: "two" },
-        ];
-        await Deno.mkdir(join(oldDirectory, "deep"), { recursive: true });
-        for (const file of originalFiles) {
-          await Deno.writeTextFile(join(baseDir, file.path), file.content);
-        }
-        await startAndWait(harness);
-
-        const failures: string[] = [];
-        await Deno.rename(oldDirectory, movedDirectory);
-        try {
-          await expectDispatchesOnce(
-            harness,
-            [
-              ...originalFiles.map(({ path }) => ({
-                path,
-                data: false as const,
-              })),
-              ...movedFiles.map(({ path, content }) => ({
-                path,
-                data: textFileData(content),
-              })),
-            ],
-            "folder move",
-          );
-        } catch (error) {
-          failures.push(errorText(error));
-        }
-
-        await Deno.remove(movedDirectory, { recursive: true });
-        try {
-          await expectDispatchesOnce(
-            harness,
-            movedFiles.map(({ path }) => ({ path, data: false })),
-            "recursive removal after folder move",
-          );
-        } catch (error) {
-          failures.push(errorText(error));
-        }
-
-        assert(
-          failures.length === 0,
-          `Folder move or recursive removal did not produce the expected dispatches.\n${
-            failures.join("\n\n")
-          }\n${diagnostics(harness, "folder move and recursive removal")}`,
-        );
-      },
-    );
   });
+
+  Deno.test({
+    name:
+      `PeerStorage ${backend.name} tracks a moved folder and recursively removed children`,
+    ignore: skipFolderRename,
+    fn: async () => {
+      await withHarness(
+        backend.useChokidar,
+        { scanOfflineChanges: false, traceNativeEvents: true },
+        async (harness, baseDir) => {
+          const oldDirectory = join(baseDir, "old-folder");
+          const movedDirectory = join(baseDir, "moved folder");
+          const originalFiles = [
+            { path: "old-folder/one.md", content: "one" },
+            { path: "old-folder/deep/two.md", content: "two" },
+          ];
+          const movedFiles = [
+            { path: "moved folder/one.md", content: "one" },
+            { path: "moved folder/deep/two.md", content: "two" },
+          ];
+          await Deno.mkdir(join(oldDirectory, "deep"), { recursive: true });
+          for (const file of originalFiles) {
+            await Deno.writeTextFile(join(baseDir, file.path), file.content);
+          }
+          await startAndWait(harness);
+
+          const failures: string[] = [];
+          traceStage(harness, "folder move requested");
+          await Deno.rename(oldDirectory, movedDirectory);
+          traceStage(harness, "folder move completed");
+          try {
+            await expectDispatchesOnce(
+              harness,
+              [
+                ...originalFiles.map(({ path }) => ({
+                  path,
+                  data: false as const,
+                })),
+                ...movedFiles.map(({ path, content }) => ({
+                  path,
+                  data: textFileData(content),
+                })),
+              ],
+              "folder move",
+            );
+          } catch (error) {
+            failures.push(errorText(error));
+          }
+
+          traceStage(harness, "recursive removal requested");
+          await Deno.remove(movedDirectory, { recursive: true });
+          traceStage(harness, "recursive removal completed");
+          try {
+            await expectDispatchesOnce(
+              harness,
+              movedFiles.map(({ path }) => ({ path, data: false })),
+              "recursive removal after folder move",
+            );
+          } catch (error) {
+            failures.push(errorText(error));
+          }
+
+          assert(
+            failures.length === 0,
+            `Folder move or recursive removal did not produce the expected dispatches.\n${
+              failures.join("\n\n")
+            }\n${diagnostics(harness, "folder move and recursive removal")}`,
+          );
+        },
+      );
+    },
+  });
+
+  Deno.test(
+    `PeerStorage ${backend.name} reports recursively removed children without a folder rename`,
+    async () => {
+      await withHarness(
+        backend.useChokidar,
+        { scanOfflineChanges: false },
+        async (harness, baseDir) => {
+          const directory = join(baseDir, "remove-folder");
+          const files = [
+            { path: "remove-folder/one.md", content: "one" },
+            { path: "remove-folder/deep/two.md", content: "two" },
+          ];
+          await Deno.mkdir(join(directory, "deep"), { recursive: true });
+          for (const file of files) {
+            await Deno.writeTextFile(join(baseDir, file.path), file.content);
+          }
+          await Deno.writeTextFile(join(baseDir, "control.md"), "untouched");
+          await startAndWait(harness);
+
+          await Deno.remove(directory, { recursive: true });
+          await expectDispatchesOnce(
+            harness,
+            files.map(({ path }) => ({ path, data: false })),
+            "recursive removal without a folder rename",
+          );
+          assert(
+            harness.dispatches.length === files.length,
+            "Recursive removal should only dispatch the removed children.\n" +
+              diagnostics(harness, "recursive removal without a folder rename"),
+          );
+          assert(
+            await Deno.readTextFile(join(baseDir, "control.md")) ===
+              "untouched",
+            "Recursive removal should preserve an unrelated file",
+          );
+        },
+      );
+    },
+  );
 }

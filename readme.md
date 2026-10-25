@@ -176,11 +176,36 @@ below leaves hidden-file synchronisation disabled. To opt in, see
       },
       "scanOfflineChanges": true,
       "ignore": ["**/.git/**", "node_modules/**"], // Glob patterns which are never synchronised. Omit to synchronise everything.
-      "useChokidar":false, // We are using `Deno.watch` now, if you have trouble in Linux, please enable this.
+      "useChokidar":false, // Use Chokidar instead of Deno.watchFs; see filesystem watcher limitations.
     }
   ]
 }
 ```
+
+## Filesystem watcher limitations
+
+Storage peers use `Deno.watchFs` by default. Setting `useChokidar` to `true`
+selects Chokidar instead.
+
+On Windows, renaming a watched directory containing subdirectories can fail
+with an access-denied error when Chokidar uses its default event-based watching.
+This includes changing only the letter case of a directory name and moving it
+to another name in the same parent directory. This restriction affects normal use while the bridge is
+running, including filesystem operations initiated outside the bridge.
+Treat these directory-tree renames as unsupported with Chokidar's default
+watching mode on Windows.
+
+Chokidar also offers polling through the `CHOKIDAR_USEPOLLING=true` environment
+variable. This periodically checks filesystem state and can increase CPU use.
+Its behaviour for these directory renames has not been verified in the bridge
+on Windows. See the [Chokidar 3.6 options](https://github.com/paulmillr/chokidar/blob/3.6.0/README.md#performance)
+for the polling intervals and other trade-offs.
+
+See the [upstream Chokidar report](https://github.com/paulmillr/chokidar/issues/1380)
+and Microsoft's [directory rename constraints](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information).
+The bridge also has folder-rename handling limitations with the default
+`Deno.watchFs` backend; switching backends does not establish that child-file
+changes will be synchronised after a folder rename.
 
 ## Vaults with an ID key
 
