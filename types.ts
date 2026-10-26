@@ -20,7 +20,7 @@ export interface PeerStorageConf {
     ignore?: string[];
 }
 export interface PeerCouchDBConf extends DirectFileManipulatorOptions {
-    /** Glob patterns for i:-prefixed (internal) files to sync, e.g. [".claude/**"] */
+    /** Vault-root glob patterns for hidden i: files, selected in both directions, e.g. [".claude/**"]. */
     includeInternal?: string[];
     type: "couchdb";
     useRemoteTweaks?: true;

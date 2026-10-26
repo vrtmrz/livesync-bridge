@@ -1,0 +1,62 @@
+name: Native watcher diagnostics
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  storage-watchers:
+    name: Native watcher limitations (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2025]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.8
+
+      - name: Runtime version
+        run: deno --version
+
+      - name: Install dependencies
+        run: deno install --frozen
+
+      - name: Diagnose native creation and rename limitations
+        run: deno task test:watcher:diagnostic
+
+  storage-couchdb:
+    name: Native watcher creation through CouchDB
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.8
+
+      - name: Install dependencies
+        run: deno install --frozen
+
+      - name: Start CouchDB
+        run: docker compose -f test/integration/compose.yml up --detach --wait
+
+      - name: Diagnose native first child writes through CouchDB
+        run: deno task test:e2e:diagnostic
+
+      - name: Stop CouchDB
+        if: always()
+        run: docker compose -f test/integration/compose.yml down --volumes
