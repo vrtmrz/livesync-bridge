@@ -682,9 +682,9 @@ for (const baseDir of ["", "blog/"]) {
                         peerOperations.push({ path, deleted: false, accepted });
                         return accepted;
                     };
-                    const originalDelete = peer.delete.bind(peer);
-                    peer.delete = async (path) => {
-                        const accepted = await originalDelete(path);
+                    const originalDeleteFrom = peer.deleteFrom.bind(peer);
+                    peer.deleteFrom = async (path, source) => {
+                        const accepted = await originalDeleteFrom(path, source);
                         peerOperations.push({ path, deleted: true, accepted });
                         return accepted;
                     };

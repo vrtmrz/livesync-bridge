@@ -3,12 +3,11 @@ import { delay, getDocData } from "@vrtmrz/livesync-commonlib/compat/common/util
 import { isPlainText } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/path";
 import { parse, format, relative, dirname, resolve, SEPARATOR, isAbsolute } from "@std/path";
 import { format as posixFormat, parse as posixParse } from "@std/path/posix";
-import { scheduleOnceIfDuplicated } from "octagonal-wheels/concurrency/lock";
-import { DispatchFun, Peer, PeerHealth } from "./Peer.ts";
+import { serialized } from "octagonal-wheels/concurrency/lock";
+import { DispatchFun, FileChangeContext, Peer, PeerHealth } from "./Peer.ts";
 import chokidar from "chokidar";
 import { minimatch } from "minimatch";
 
-import { scheduleTask } from "octagonal-wheels/concurrency/task";
 import {
     Logger,
     LOG_LEVEL_INFO,
@@ -31,6 +30,47 @@ export class PeerStorage extends Peer {
     // The children cannot be enumerated from disk after their folder has gone.
     private knownFiles = new Set<string>();
     private readyDenoWatcher?: Deno.FsWatcher;
+    private stopped = false;
+    private generation = 0;
+    private closing?: Promise<void>;
+    private pendingEvents = new Map<string, Deno.FsEvent>();
+    private pendingTasks = new Map<string, { next?: () => Promise<void>; promise: Promise<void> }>();
+
+    private queueTask(key: string, lock: string, action: () => Promise<void>): Promise<void> {
+        const previous = this.pendingTasks.get(key);
+        if (previous) {
+            previous.next = action;
+            return previous.promise;
+        }
+        const pending = { next: action as (() => Promise<void>) | undefined, promise: Promise.resolve() };
+        this.pendingTasks.set(key, pending);
+        pending.promise = serialized(lock, async () => {
+            const failures: unknown[] = [];
+            while (pending.next) {
+                const next = pending.next;
+                pending.next = undefined;
+                try {
+                    await next();
+                } catch (ex) {
+                    failures.push(ex);
+                }
+            }
+            if (failures.length) throw new AggregateError(failures, `File change failed: ${key}`);
+        }).finally(() => { this.pendingTasks.delete(key); });
+        // Watcher callbacks have no caller to receive rejection. Keep failures visible
+        // without acknowledging their contents or losing the drainable promise.
+        void pending.promise.catch(ex => {
+            this.normalLog(`File change failed: ${key}`, LOG_LEVEL_NOTICE);
+            Logger(ex, LOG_LEVEL_VERBOSE);
+        });
+        return pending.promise;
+    }
+
+    private async drain(): Promise<void> {
+        while (this.pendingTasks.size) {
+            await Promise.allSettled([...this.pendingTasks.values()].map(task => task.promise));
+        }
+    }
 
 
     constructor(conf: PeerStorageConf, dispatcher: DispatchFun) {
@@ -85,21 +125,47 @@ export class PeerStorage extends Peer {
         }
         const lp = this.toLocalPath(pathSrc);
         const path = this.toStoragePath(lp);
-        // Keyed by the vault path, like dispatchDeleted(), so the resulting watcher event is a repeat.
-        if (await this.isRepeating(pathSrc, false)) {
-            return false;
-        }
-        try {
-            await Deno.remove(path);
+        return await this.applyChange(pathSrc, false, async () => {
+            try {
+                await Deno.remove(path);
+            } catch (ex) {
+                if (ex instanceof Deno.errors.NotFound) return false;
+                this.receiveLog(` ${path} delete failed`, LOG_LEVEL_NOTICE);
+                throw ex;
+            }
             this.receiveLog(` ${path} deleted`);
+            this.knownFiles.delete(path);
+            void this.runScript(path, true);
+            return true;
+        });
+    }
+    override async rename(previousPath: string, path: string, data: FileData): Promise<boolean> {
+        if (this.isUnsafeVaultPath(previousPath) || this.isUnsafeVaultPath(path)) return false;
+        const saved = await this.put(path, data);
+        if (!saved) return false;
+        try {
+            const previous = await Deno.realPath(this.toStoragePath(this.toLocalPath(previousPath)));
+            const current = await Deno.realPath(this.toStoragePath(this.toLocalPath(path)));
+            if (previous === current) return saved;
         } catch (ex) {
-            this.receiveLog(` ${path} delete failed`, LOG_LEVEL_NOTICE);
-            Logger(ex, LOG_LEVEL_VERBOSE);
-            return false;
+            if (!(ex instanceof Deno.errors.NotFound)) throw ex;
         }
-        this.knownFiles.delete(path);
-        this.runScript(path, true);
-        return true;
+        if (previousPath !== path) await this.delete(previousPath);
+        return saved;
+    }
+    override async deleteFrom(path: string, source: Peer): Promise<boolean> {
+        const current = await source.currentPaths(path);
+        if (current.includes(path)) return false;
+        for (const candidate of current) {
+            try {
+                const oldPath = await Deno.realPath(this.toStoragePath(this.toLocalPath(path)));
+                const newPath = await Deno.realPath(this.toStoragePath(this.toLocalPath(candidate)));
+                if (oldPath === newPath) return false;
+            } catch (ex) {
+                if (!(ex instanceof Deno.errors.NotFound)) throw ex;
+            }
+        }
+        return await this.delete(path);
     }
     async put(pathSrc: string, data: FileData): Promise<boolean> {
         if (this.isUnsafeVaultPath(pathSrc)) {
@@ -129,31 +195,26 @@ export class PeerStorage extends Peer {
                     return false;
                 }
             }
-            // Keyed by the vault path, like dispatch(), so the resulting watcher event is a repeat.
-            if (await this.isRepeating(pathSrc, data)) {
-                this.receiveLog(`${lp} save repeating`);
-                return false;
-            }
-            const dirName = dirname(path);
-            try {
-                await Deno.mkdir(dirName, { recursive: true });
-            } catch (ex) {
-                // While recursive is true, mkdir will not raise the `AlreadyExist`.
-                console.log(ex);
-            }
-            const fp = await Deno.open(path, { read: true, write: true, create: true });
-            const writtensize = await fp.write(incoming);
-            await fp.truncate(writtensize);
-            await fp.utime(new Date(data.mtime), new Date(data.mtime));
-            fp.close();
-            this.receiveLog(`${lp} saved`);
-            await this.writeFileStat(pathSrc);
-            this.runScript(path, false);
-            return true;
+            return await this.applyChange(pathSrc, data, async () => {
+                await Deno.mkdir(dirname(path), { recursive: true });
+                const fp = await Deno.open(path, { read: true, write: true, create: true });
+                try {
+                    let offset = 0;
+                    while (offset < incoming.byteLength) offset += await fp.write(incoming.subarray(offset));
+                    await fp.truncate(offset);
+                    await fp.utime(new Date(data.mtime), new Date(data.mtime));
+                } finally {
+                    fp.close();
+                }
+                this.receiveLog(`${lp} saved`);
+                await this.writeFileStat(pathSrc);
+                void this.runScript(path, false);
+                return true;
+            });
         } catch (ex) {
             Logger(ex, LOG_LEVEL_INFO);
             this.receiveLog(`${lp} save failed`);
-            return false;
+            throw ex;
         }
     }
 
@@ -248,57 +309,55 @@ export class PeerStorage extends Peer {
     }
 
     dispatch(pathSrc: string): Promise<void> {
-        const lP = this.toStoragePath(this.toLocalPath("."));
-        const path = this.toPosixPath(relative(lP, pathSrc));
-        if (this.isOutsideBaseDir(path)) return Promise.resolve();
-
-        if (this.isIgnored(path)) {
-            this.debugLog(`${path} ignored`);
-            return Promise.resolve();
-        }
-
-        scheduleOnceIfDuplicated(pathSrc, async () => {
+        if (!this.stopped) void this.queueDispatch(pathSrc);
+        return Promise.resolve();
+    }
+    private queueDispatch(pathSrc: string, context?: FileChangeContext): Promise<void> {
+        const path = this.toRelativePath(pathSrc);
+        if (this.isOutsideBaseDir(path) || this.isIgnored(path)) return Promise.resolve();
+        return this.queueTask(pathSrc, pathSrc, async () => {
+            await delay(250);
             let data: FileData | false;
             try {
-                await delay(250);
-                // Read after waiting so a completed incoming update or deletion
-                // supersedes the earlier watcher event's content.
                 data = await this.get(path);
-                if (data !== false) await this.writeFileStat(path);
             } catch (ex) {
                 if (!(ex instanceof Deno.errors.NotFound)) {
                     this.normalLog(`File read failed: ${path}`, LOG_LEVEL_NOTICE);
                     Logger(ex, LOG_LEVEL_VERBOSE);
                 }
+                if (context?.previousPath !== undefined) throw ex;
                 return;
             }
-            if (data === false) return;
-            if (!await this.isRepeating(path, data)) {
-                this.sendLog(`${path} change detected`);
-                await this.dispatchToHub(this, this.toGlobalPath(path), data);
+            if (!data) {
+                if (context?.previousPath !== undefined) throw new Error(`Rename target is no longer a file: ${path}`);
+                return;
             }
+            this.knownFiles.add(resolve(pathSrc));
+            await this.applyChange(path, data, async () => {
+                this.sendLog(`${path} change detected`);
+                await this.dispatchToHub(this, path, data, context);
+                this.setSetting(`file-stat-${this.toLocalPath(path)}`, `${data.mtime}-${data.size}`);
+                return true;
+            }, { force: context?.previousPath !== undefined, suppressPendingEcho: true });
         });
-        return Promise.resolve();
     }
     async dispatchDeleted(pathSrc: string) {
-        const lP = this.toStoragePath(this.toLocalPath("."));
-        const path = this.toPosixPath(relative(lP, pathSrc));
-        if (this.isOutsideBaseDir(path)) return;
-        if (this.isIgnored(path)) {
-            this.debugLog(`${path} ignored`);
-            return;
-        }
-        await scheduleOnceIfDuplicated(pathSrc, async () => {
+        if (this.stopped) return;
+        await this.queueDeletion(pathSrc);
+    }
+    private queueDeletion(pathSrc: string): Promise<void> {
+        const path = this.toRelativePath(pathSrc);
+        if (this.isOutsideBaseDir(path) || this.isIgnored(path)) return Promise.resolve();
+        return this.queueTask(pathSrc, pathSrc, async () => {
             await delay(250);
-            // A real or emulated deletion can become stale while it waits behind a write.
             if (!await this.isMissing(pathSrc)) return;
-            if (!await this.isRepeating(path, false)) {
+            await this.applyChange(path, false, async () => {
                 this.sendLog(`${path} delete detected`);
-                await this.dispatchToHub(this, this.toGlobalPath(path), false);
-            }
+                await this.dispatchToHub(this, path, false);
+                return true;
+            }, { suppressPendingEcho: true });
             this.knownFiles.delete(resolve(pathSrc));
         });
-
     }
 
     // A change outside this peer's baseDir must never reach the hub: "../Other/note.md" would be
@@ -368,7 +427,7 @@ export class PeerStorage extends Peer {
     private async isMissing(path: string): Promise<boolean> {
         try {
             await Deno.stat(path);
-            return false;
+            return !(await this.currentPaths(this.toRelativePath(path))).includes(this.toRelativePath(path));
         } catch (ex) {
             if (ex instanceof Deno.errors.NotFound) return true;
             // Permission and I/O errors do not establish that the file has gone.
@@ -378,39 +437,132 @@ export class PeerStorage extends Peer {
         }
     }
 
-    processFile(event: Deno.FsEvent) {
-        for (const eventPath of event.paths) {
-            const path = resolve(eventPath);
-            const relativePath = this.toRelativePath(path);
-            if (this.isOutsideBaseDir(relativePath)) continue;
-            // Filter before scheduling the task, which stats the path.
-            if (this.isIgnored(relativePath)) {
-                this.debugLog(`${relativePath} ignored`);
-                continue;
-            }
-            const key = `${event.kind}-${path}`;
-            scheduleTask(key, 100, async () => {
-                let existence: Deno.FileInfo | undefined;
+    // Match directory entries to recover their actual spelling on case-insensitive
+    // filesystems. Folding discovers candidates; the destination decides document identity.
+    private async currentEntries(path: string, includeAliases = false): Promise<string[]> {
+        if (this.isOutsideBaseDir(path) || this.isUnsafeVaultPath(path)) return [];
+        let parents = [this.toStoragePath(this.toLocalPath("."))];
+        for (const segment of path.split("/").filter(Boolean)) {
+            const next: string[] = [];
+            for (const parent of parents) {
                 try {
-                    existence = await Deno.stat(path);
-                } catch (ex) {
-                    if (!(ex instanceof Deno.errors.NotFound)) {
-                        this.normalLog(`Deletion verification failed: ${path}`, LOG_LEVEL_NOTICE);
-                        Logger(ex, LOG_LEVEL_VERBOSE);
-                        return;
+                    const matches: string[] = [];
+                    for await (const entry of Deno.readDir(parent)) {
+                        if (!entry.isSymlink && entry.name.toLowerCase() === segment.toLowerCase()) matches.push(entry.name);
                     }
+                    const selected = !includeAliases && matches.includes(segment) ? [segment] : matches;
+                    for (const name of selected) {
+                        const candidate = resolve(parent, name);
+                        if (this.isIgnored(this.toRelativePath(candidate))) {
+                            throw new Error(`Path inspection blocked by an ignored directory: ${candidate}`);
+                        }
+                        next.push(candidate);
+                    }
+                } catch (ex) {
+                    if (!(ex instanceof Deno.errors.NotFound) && !(ex instanceof Deno.errors.NotADirectory)) throw ex;
                 }
-                if (existence?.isFile) {
-                    await this.dispatch(path);
-                } else if (!existence || (existence.isDirectory && event.kind === "remove")) {
-                    // Emulate only file deletions: the parent path is a watcher hint, not
-                    // a document to delete. A recreated parent can still have missing children.
-                    const prefix = path.endsWith(SEPARATOR) ? path : `${path}${SEPARATOR}`;
-                    const candidates = [...this.knownFiles].filter((file) => file === path || file.startsWith(prefix));
-                    await Promise.all(candidates.map((file) => this.dispatchDeleted(file)));
-                }
-            });
+            }
+            parents = next;
         }
+        return parents;
+    }
+    override async currentPaths(path: string): Promise<string[]> {
+        const files: string[] = [];
+        for (const candidate of await this.currentEntries(path, true)) {
+            try {
+                if ((await Deno.lstat(candidate)).isFile) {
+                    const current = this.toRelativePath(candidate);
+                    if (this.isIgnored(current)) throw new Error(`Deletion verification blocked by an ignored path: ${current}`);
+                    files.push(current);
+                }
+            } catch (ex) {
+                if (!(ex instanceof Deno.errors.NotFound)) throw ex;
+            }
+        }
+        return files;
+    }
+    processFile(event: Deno.FsEvent) {
+        if (this.stopped) return;
+        const paths = [...new Set(event.paths.map(path => resolve(path)))].filter(path => {
+            const relative = this.toRelativePath(path);
+            return !this.isOutsideBaseDir(relative) && !this.isIgnored(relative);
+        });
+        if (!paths.length) return;
+        const key = `${event.kind}:${paths.join("\0")}`;
+        this.pendingEvents.set(key, { ...event, paths });
+        void this.queueTask("watcher-events", `${this.operationKey}:scan`, async () => {
+            await delay(100);
+            const events = [...this.pendingEvents.values()];
+            this.pendingEvents.clear();
+            // A paired event establishes a relation. Process it before accompanying
+            // remove hints, without inferring a relation between separate events.
+            const paired = (event: Deno.FsEvent) => event.kind === "rename" && event.paths.length === 2;
+            events.sort((a, b) => Number(paired(b)) - Number(paired(a)));
+            const failures: unknown[] = [];
+            const blocked: string[] = [];
+            const contains = (parent: string, path: string) => path === parent || path.startsWith(`${parent}${SEPARATOR}`);
+            for (const accepted of events) {
+                if (accepted.paths.some(path => blocked.some(parent => contains(parent, path) || contains(path, parent)))) continue;
+                try {
+                    await this.reconcileEvent(accepted);
+                } catch (ex) {
+                    this.normalLog(`Watcher reconciliation failed: ${accepted.paths.join(", ")}`, LOG_LEVEL_NOTICE);
+                    failures.push(ex);
+                    // Preserve a failed rename's source while continuing unrelated work.
+                    if (paired(accepted)) blocked.push(...accepted.paths);
+                }
+            }
+            if (failures.length) throw new AggregateError(failures, "Watcher reconciliation failed");
+        });
+    }
+    private async reconcileEvent(event: Deno.FsEvent): Promise<void> {
+        const entries = new Map<string, string[]>();
+        for (const path of event.paths) {
+            try {
+                await Deno.stat(path);
+            } catch (ex) {
+                if (!(ex instanceof Deno.errors.NotFound)) throw ex;
+            }
+            entries.set(path, await this.currentEntries(this.toRelativePath(path)));
+        }
+        const oldPath = event.kind === "rename" && event.paths.length === 2
+            ? event.paths.find(path => !entries.get(path)!.includes(path)) : undefined;
+        const newPath = oldPath ? event.paths.find(path => path !== oldPath && entries.get(path)!.includes(path)) : undefined;
+        if (oldPath && newPath) {
+            await this.reconcilePath(newPath, oldPath);
+            await this.reconcilePath(oldPath, undefined, false);
+        } else {
+            for (const path of event.paths) await this.reconcilePath(path, undefined, event.kind !== "remove");
+        }
+    }
+    private async reconcilePath(path: string, previousPath?: string, emitChanges = true): Promise<void> {
+        const currentFiles = new Set<string>();
+        for (const current of emitChanges ? await this.currentEntries(this.toRelativePath(path)) : []) {
+            const relativePath = this.toRelativePath(current);
+            if (this.isIgnored(relativePath)) continue;
+            let stat: Deno.FileInfo;
+            try {
+                stat = await Deno.lstat(current);
+            } catch (ex) {
+                if (ex instanceof Deno.errors.NotFound) continue;
+                throw ex;
+            }
+            const files = stat.isFile ? [current] : stat.isDirectory ? this.listFiles(current, relativePath) : [];
+            const saves: Promise<void>[] = [];
+            for await (const file of files) {
+                currentFiles.add(file);
+                this.knownFiles.add(file);
+                const oldFile = previousPath ? resolve(previousPath, relative(current, file)) : undefined;
+                const context = oldFile && this.knownFiles.has(oldFile)
+                    ? { previousPath: this.toRelativePath(oldFile) } : undefined;
+                saves.push(this.queueDispatch(file, context));
+            }
+            await Promise.all(saves);
+        }
+        const prefix = path.endsWith(SEPARATOR) ? path : `${path}${SEPARATOR}`;
+        const removed = [...this.knownFiles].filter(file =>
+            (file === path || file.startsWith(prefix)) && !currentFiles.has(file));
+        await Promise.all(removed.map(file => this.queueDeletion(file)));
     }
 
     // Prune ignored trees before inventorying or inspecting their contents, even
@@ -435,16 +587,10 @@ export class PeerStorage extends Peer {
     }
 
     async startDenoFsWatch(): Promise<void> {
-        if (this.watcherDeno) {
-            const watcher = this.watcherDeno;
-            this.watcherDeno = undefined;
-            try {
-                watcher.close();
-            } catch (ex) {
-                // Closing a watcher more than once is harmless for its lifecycle.
-                Logger(ex, LOG_LEVEL_VERBOSE);
-            }
-        }
+        const generation = ++this.generation;
+        if (this.watcherDeno || this.watcher || this.pendingTasks.size || this.closing) await this.closeAndDrain();
+        if (this.generation !== generation) return;
+        this.stopped = false;
         const lP = this.toStoragePath(this.toLocalPath("."));
         const watcher = Deno.watchFs(lP, { recursive: true });
         this.watcherDeno = watcher;
@@ -472,6 +618,7 @@ export class PeerStorage extends Peer {
             if (this.watcherDeno !== watcher) return;
             this.readyDenoWatcher = watcher;
             for await (const event of watcher) {
+                if (this.watcherDeno !== watcher) break;
                 this.processFile(event);
             }
         } finally {
@@ -495,11 +642,10 @@ export class PeerStorage extends Peer {
             return;
         }
 
-        if (this.watcher) {
-            const watcher = this.watcher;
-            this.watcher = undefined;
-            await this.closeChokidarWatcher(watcher);
-        }
+        const generation = ++this.generation;
+        if (this.watcher || this.watcherDeno || this.pendingTasks.size || this.closing) await this.closeAndDrain();
+        if (this.generation !== generation) return;
+        this.stopped = false;
         const lP = this.toStoragePath(this.toLocalPath("."));
         this.normalLog(`Scan offline changes: ${this.config.scanOfflineChanges ? "Enabled, now starting..." : "Disabled"}`);
         const watcher = chokidar.watch(lP,
@@ -571,6 +717,17 @@ export class PeerStorage extends Peer {
         })
     }
     async stop() {
+        this.generation++;
+        await this.closeAndDrain();
+    }
+    private closeAndDrain(): Promise<void> {
+        if (!this.closing) {
+            this.closing = this.closeWatchers().finally(() => { this.closing = undefined; });
+        }
+        return this.closing;
+    }
+    private async closeWatchers(): Promise<void> {
+        this.stopped = true;
         const watcher = this.watcher;
         this.watcher = undefined;
         const watcherDeno = this.watcherDeno;
@@ -585,6 +742,7 @@ export class PeerStorage extends Peer {
             }
         }
         await this.closeChokidarWatcher(watcher);
+        await this.drain();
     }
     override health(): PeerHealth {
         const ok = !!(this.watcher || (this.watcherDeno && this.readyDenoWatcher === this.watcherDeno));

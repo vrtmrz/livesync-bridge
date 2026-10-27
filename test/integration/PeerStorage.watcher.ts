@@ -481,7 +481,7 @@ for (const backend of WATCHERS) {
 
   for (const preExistingDirectory of [false, true]) {
     watcherTest(
-      !backend.useChokidar && !preExistingDirectory ? "diagnostic" : "standard",
+      !backend.useChokidar && !preExistingDirectory ? "both" : "standard",
       `PeerStorage ${backend.name} sees a first child write in a ${
         preExistingDirectory ? "pre-existing" : "new"
       } .claude directory`,
@@ -779,7 +779,7 @@ for (const backend of WATCHERS) {
   );
 
   watcherTest(
-    backend.useChokidar ? "standard" : "diagnostic",
+    backend.useChokidar ? "standard" : "both",
     `PeerStorage ${backend.name} preserves deep paths with spaces and Japanese names for both baseDir forms`,
     async () => {
       for (const relativeBaseDir of [false, true]) {
@@ -817,7 +817,7 @@ for (const backend of WATCHERS) {
     },
   );
 
-  watcherTest(backend.useChokidar ? "standard" : "diagnostic", {
+  watcherTest(backend.useChokidar ? "standard" : "both", {
     name: "PeerStorage " + backend.name +
       " reports case-only folder renames with exact paths",
     ignore: skipFolderRename,
@@ -929,7 +929,7 @@ for (const backend of WATCHERS) {
     },
   });
 
-  watcherTest(backend.useChokidar ? "standard" : "diagnostic", {
+  watcherTest(backend.useChokidar ? "standard" : "both", {
     name:
       `PeerStorage ${backend.name} tracks a moved folder and recursively removed children`,
     ignore: skipFolderRename,
