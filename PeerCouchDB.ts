@@ -17,6 +17,7 @@ import {
     unique,
 } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import { minimatch } from "minimatch";
+import { serialized } from "octagonal-wheels/concurrency/lock";
 import { promiseWithResolver } from "octagonal-wheels/promises";
 import { LOG_LEVEL_NOTICE } from "octagonal-wheels/common/logger";
 
@@ -126,54 +127,120 @@ export class PeerCouchDB extends Peer {
         await this._started.promise;
         return await this._canAccessPath(resolved) ? resolved : false;
     }
+    private async withDocumentLocks<T>(paths: FilePathWithPrefix[], action: () => Promise<T>): Promise<T> {
+        const ids = [...new Set(await Promise.all(paths.map(path => this.man.path2id(path))))].sort();
+        const lock = (index: number): Promise<T> => index === ids.length ? action()
+            : serialized(`${this.operationKey}:document:${ids[index]}`, () => lock(index + 1));
+        return await lock(0);
+    }
+    private async deleteResolved(resolved: ResolvedCouchDBPath): Promise<boolean> {
+        return await this.applyChange(resolved.sharedPath, false, async () => {
+            const existing = await this.man.get(resolved.databasePath, true);
+            if (!existing || existing.deleted) return false;
+            if (!await this.man.delete(resolved.databasePath)) {
+                throw new Error(`Delete failed: ${resolved.databasePath}`);
+            }
+            this.receiveLog(` ${resolved.databasePath} deleted`);
+            return true;
+        });
+    }
     async delete(pathSrc: string): Promise<boolean> {
         const resolved = await this._prepareOutgoingPath(pathSrc);
         if (!resolved) return false;
-        const path = resolved.databasePath;
-        if (await this.isRepeating(pathSrc, false)) {
-            return false;
+        return await this.withDocumentLocks([resolved.databasePath], () => this.deleteResolved(resolved));
+    }
+    override async deleteFrom(path: string, source: Peer): Promise<boolean> {
+        const resolved = await this._prepareOutgoingPath(path);
+        if (!resolved) return false;
+        return await this.withDocumentLocks([resolved.databasePath], async () => {
+            const id = await this.man.path2id(resolved.databasePath);
+            const matching: ResolvedCouchDBPath[] = [];
+            // Recheck the source under the destination document lock. Separate watcher
+            // events are not evidence of a rename, but a live identity forbids deletion.
+            for (const current of await source.currentPaths(path)) {
+                const candidate = this._resolveSharedPath(current);
+                if (candidate && await this.man.path2id(candidate.databasePath) === id) matching.push(candidate);
+            }
+            if (matching.length > 1) throw new Error(`Deletion blocked by ambiguous current paths: ${path}`);
+            if (matching.length === 1) {
+                const candidate = matching[0];
+                if (!await this._canAccessPath(candidate)) throw new Error(`Deletion verification blocked: ${path}`);
+                const data = await source.get(candidate.sharedPath as FilePathWithPrefix);
+                if (!data) throw new Error(`Current file could not be read: ${candidate.sharedPath}`);
+                await this.putResolved(candidate, data);
+                return false;
+            }
+            return await this.deleteResolved(resolved);
+        });
+    }
+    override async rename(previousPath: string, path: string, data: FileData): Promise<boolean> {
+        const previous = this._resolveSharedPath(previousPath);
+        const target = this._resolveSharedPath(path);
+        await this._started.promise;
+        for (const resolved of [previous, target]) {
+            if (resolved && !await this._canAccessPath(resolved)) {
+                throw new Error(`Rename path inspection blocked: ${resolved.sharedPath}`);
+            }
         }
-        const r = await this.man.delete(path);
-        if (r) {
-            this.receiveLog(` ${path} deleted`);
-        } else {
-            this.receiveLog(` ${path} delete failed`, LOG_LEVEL_NOTICE);
-        }
-        return r;
+        const paths = [previous, target].filter((value): value is ResolvedCouchDBPath => !!value);
+        return await this.withDocumentLocks(paths.map(value => value.databasePath), async () => {
+            if (!target) return previous ? await this.deleteResolved(previous) : false;
+            if (!previous) return await this.putResolved(target, data);
+            const oldId = await this.man.path2id(previous.databasePath);
+            const newId = await this.man.path2id(target.databasePath);
+            if (oldId === newId) return await this.putResolved(target, data);
+            const collision = await this.man.get(target.databasePath, true);
+            if (collision && !collision.deleted) {
+                const old = await this.man.get(previous.databasePath, true);
+                const current = await this.man.getById(newId, true) as false | ManipulatorMetaEntry;
+                // Another destination may have failed after this one completed. A
+                // verified completed rename must not block that destination's retry.
+                if ((!old || old.deleted) && current && current.path === target.databasePath) {
+                    const ready = await this.man.getByMeta(current);
+                    if (ready && "data" in ready) {
+                        const existing = ready.type === "plain" ? createTextBlob(ready.data)
+                            : createBinaryBlob(new Uint8Array(decodeBinary(ready.data)));
+                        const incoming = data.data instanceof Uint8Array ? createBinaryBlob(data.data) : createTextBlob(data.data);
+                        if (await isDocContentSame(existing, incoming)) return false;
+                    }
+                }
+                throw new Error(`Rename target already exists: ${target.databasePath}`);
+            }
+            const saved = await this.putResolved(target, data);
+            await this.deleteResolved(previous);
+            return saved;
+        });
     }
     async put(pathSrc: string, data: FileData): Promise<boolean> {
         const resolved = await this._prepareOutgoingPath(pathSrc);
         if (!resolved) return false;
+        return await this.withDocumentLocks([resolved.databasePath], () => this.putResolved(resolved, data));
+    }
+    private async putResolved(resolved: ResolvedCouchDBPath, data: FileData): Promise<boolean> {
         const path = resolved.databasePath;
-        if (await this.isRepeating(pathSrc, data)) {
-            return false;
+        let old: false | ManipulatorMetaEntry;
+        try {
+            old = await this.man.getById(await this.man.path2id(path), true) as false | ManipulatorMetaEntry;
+        } catch (ex) {
+            if ((ex as { status?: number })?.status !== 404) throw ex;
+            old = false;
         }
-        const type = isPlainText(path) ? "plain" : "newnote";
-        const info = {
-            ctime: data.ctime,
-            mtime: data.mtime,
-            size: data.size
-        };
-        const saveData = (data.data instanceof Uint8Array) ? createBinaryBlob(data.data) : createTextBlob(data.data);
-        const old = await this.man.get(path as FilePathWithPrefix, true) as false | ManipulatorMetaEntry;
-        // const old = await this.getMeta(path as FilePathWithPrefix);
-        if (old && Math.abs(this.compareDate(info, old)) < 3600) {
-            const oldDoc = await this.man.getByMeta(old);
-            if (oldDoc && ("data" in oldDoc)) {
-                const d = oldDoc.type == "plain" ? createTextBlob(oldDoc.data) : createBinaryBlob(new Uint8Array(decodeBinary(oldDoc.data)));
-                if (await isDocContentSame(d, saveData)) {
-                    this.normalLog(` Skipped (Same) ${path} `);
-                    return false;
+        return await this.applyChange(resolved.sharedPath, data, async () => {
+            const type = isPlainText(path) ? "plain" : "newnote";
+            const info = { ctime: data.ctime, mtime: data.mtime, size: data.size };
+            const saveData = data.data instanceof Uint8Array ? createBinaryBlob(data.data) : createTextBlob(data.data);
+            if (old && !old.deleted && old.path === path && Math.abs(this.compareDate(info, old)) < 3600) {
+                const oldDoc = await this.man.getByMeta(old);
+                if (oldDoc && "data" in oldDoc) {
+                    const body = oldDoc.type === "plain" ? createTextBlob(oldDoc.data)
+                        : createBinaryBlob(new Uint8Array(decodeBinary(oldDoc.data)));
+                    if (await isDocContentSame(body, saveData)) return false;
                 }
             }
-        }
-        const r = await this.man.put(path, saveData, info, type);
-        if (r) {
+            if (!await this.man.put(path, saveData, info, type)) throw new Error(`Save failed: ${path}`);
             this.receiveLog(` ${path} saved`);
-        } else {
-            this.receiveLog(` ${path} ignored`);
-        }
-        return r;
+            return true;
+        }, { force: !old || !!old.deleted || old.path !== path });
     }
     async get(pathSrc: FilePathWithPrefix): Promise<false | FileData> {
         const resolved = await this._prepareOutgoingPath(pathSrc);
@@ -397,17 +464,19 @@ export class PeerCouchDB extends Peer {
             );
             return;
         }
-        if (!await this.isRepeating(path, data)) {
+        await this.applyChange(path, data, async () => {
             await this.dispatchToHub(this, path, data);
-        }
+            return true;
+        }, { suppressPendingEcho: true });
         // else {
         //     this.receiveLog(`${path} dispatch repeating`);
         // }
     }
     async dispatchDeleted(path: string) {
-        if (!await this.isRepeating(path, false)) {
+        await this.applyChange(path, false, async () => {
             await this.dispatchToHub(this, path, false);
-        }
+            return true;
+        }, { suppressPendingEcho: true });
     }
     async stop(): Promise<void> {
         // `man` may not exist yet if stop() races a still-connecting start().

@@ -215,7 +215,7 @@ for (const baseDir of ["", "blog/"]) {
     for (const { encryptInternalMetadata, directoryExistsBeforeWatch, useChokidar } of watcherScenarios) {
         const backend = useChokidar ? "Chokidar" : "Native";
         watcherTest(
-            !useChokidar && !directoryExistsBeforeWatch ? "diagnostic" : "standard",
+            !useChokidar && !directoryExistsBeforeWatch ? "both" : "standard",
             backend + " watcher synchronises selected hidden files | baseDir: " +
                 (baseDir || "empty") + " | encrypted metadata: " + encryptInternalMetadata +
                 " | directory: " + (directoryExistsBeforeWatch ? "pre-existing" : "newly created"),

@@ -4,8 +4,12 @@ import { PeerConf, FileData } from "./types.ts";
 import { Logger, LOG_LEVEL_DEBUG, LOG_LEVEL_INFO, type LOG_LEVEL } from "octagonal-wheels/common/logger";
 import { LRUCache } from "octagonal-wheels/memory/LRUCache";
 import { computeHash } from "./util.ts";
+import { serialized } from "octagonal-wheels/concurrency/lock";
 
-export type DispatchFun = (source: Peer, path: string, data: FileData | false) => Promise<void>;
+export interface FileChangeContext {
+    previousPath?: string;
+}
+export type DispatchFun = (source: Peer, path: string, data: FileData | false, context?: FileChangeContext) => Promise<void>;
 
 export interface PeerHealth {
     name: string;
@@ -90,7 +94,41 @@ export abstract class Peer {
     abstract get(path: FilePathWithPrefix): Promise<false | FileData>;
     abstract start(): Promise<void>;
     abstract stop(): Promise<void>;
+    currentPaths(_path: string): Promise<string[]> {
+        return Promise.resolve([]);
+    }
+    async deleteFrom(path: string, source: Peer): Promise<boolean> {
+        if ((await source.currentPaths(path)).includes(path)) return false;
+        return await this.delete(path);
+    }
+    async rename(previousPath: string, path: string, data: FileData): Promise<boolean> {
+        const result = await this.put(path, data);
+        if (result && previousPath !== path) await this.delete(previousPath);
+        return result;
+    }
     cache = new LRUCache<string, string>(300, 10000000, true);
+    protected readonly operationKey = crypto.randomUUID();
+    private pendingChanges = new Map<string, { hash: string; outgoing: boolean }>();
+    protected async applyChange(path: string, data: FileData | false, action: () => Promise<boolean>,
+        options: { force?: boolean; suppressPendingEcho?: boolean } = {}) {
+        const hash = await computeHash(data === false ? ["\u0001Deleted"] : data.data);
+        // Outgoing values already exist in this backend. Their returning echo can
+        // finish without waiting on the original delivery. Two incoming saves wait
+        // for each other, so a failed write cannot acknowledge the later request.
+        const pending = this.pendingChanges.get(path);
+        if (!options.force && pending?.hash === hash && (options.suppressPendingEcho || pending.outgoing)) return false;
+        return await serialized(`${this.operationKey}:change:${path}`, async () => {
+            if (!options.force && this.cache.get(path) === hash) return false;
+            this.pendingChanges.set(path, { hash, outgoing: options.suppressPendingEcho ?? false });
+            try {
+                const result = await action();
+                this.cache.set(path, hash);
+                return result;
+            } finally {
+                this.pendingChanges.delete(path);
+            }
+        });
+    }
     async isRepeating(path: string, data: FileData | false) {
         const d = await computeHash(data === false ? ["\u0001Deleted"] : data.data);
 

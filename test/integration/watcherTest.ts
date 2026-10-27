@@ -1,4 +1,4 @@
-type WatcherTestSuite = "standard" | "diagnostic";
+type WatcherTestSuite = "standard" | "diagnostic" | "both";
 
 const selectedSuite = Deno.env.get("BRIDGE_WATCHER_TEST_SUITE") ?? "standard";
 if (selectedSuite !== "standard" && selectedSuite !== "diagnostic") {
@@ -6,7 +6,7 @@ if (selectedSuite !== "standard" && selectedSuite !== "diagnostic") {
 }
 
 // Keep the original operations and assertions in both suites. Diagnostic
-// failures remain failures; selecting a suite only changes which tests run.
+// failures remain failures. Repaired cases run in both standard CI and focused diagnostics.
 export function watcherTest(
   suite: WatcherTestSuite,
   definition: Deno.TestDefinition,
@@ -35,6 +35,6 @@ export function watcherTest(
     name: suite === "diagnostic"
       ? "[diagnostic] " + definition.name
       : definition.name,
-    ignore: definition.ignore || suite !== selectedSuite,
+    ignore: definition.ignore || (suite !== "both" && suite !== selectedSuite),
   });
 }

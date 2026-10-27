@@ -103,6 +103,7 @@ function fixture(
         entry && !entry.deleted && !entry._deleted ? entry : false,
       );
     },
+    getById: (id: string) => Promise.resolve(documents.get(id.substring(3)) ?? false),
     getByMeta: (entry: Doc) => {
       loaded.push(entry.path);
       return Promise.resolve(entry);

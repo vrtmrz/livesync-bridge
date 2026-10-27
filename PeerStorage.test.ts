@@ -179,6 +179,7 @@ Deno.test("PeerStorage Deno watcher does not clear a newer concurrent watcher", 
         const peer = makePeer(tempDir);
         const first = peer.startDenoFsWatch().catch(() => undefined);
         const second = peer.startDenoFsWatch().catch(() => undefined);
+        await waitFor(() => watchers.length === 2, "Restart should create a new watcher after draining the old one");
         assertEquals(watchers.length, 2, "concurrent start should create two Deno watchers");
 
         await waitForDenoWatch(peer);
@@ -191,6 +192,189 @@ Deno.test("PeerStorage Deno watcher does not clear a newer concurrent watcher", 
         await second;
         assert(!peer.health().ok, "health should be false after the current watcher ends");
     } finally {
+        Deno.watchFs = originalWatchFs;
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+
+Deno.test("PeerStorage opens only the newest Deno watcher when a restart is superseded during delivery drain", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-restart-supersede-" });
+    const originalWatchFs = Deno.watchFs;
+    const watchers: ControlledDenoWatcher[] = [];
+    const peer = makePeer(tempDir);
+    const releaseDispatch = Promise.withResolvers<void>();
+    const startTasks: Promise<void>[] = [];
+    const stopTasks: Promise<void>[] = [];
+    const startErrors: unknown[] = [];
+    let pendingStarts = 0;
+    let dispatchEntered = false;
+    let dispatchCompleted = false;
+    let supersededStartDone = false;
+    let newestStartDone = false;
+    peer.dispatchToHub = async () => {
+        dispatchEntered = true;
+        await releaseDispatch.promise;
+        dispatchCompleted = true;
+    };
+
+    const beginStart = (onSettled: () => void) => {
+        pendingStarts++;
+        const task = peer.startDenoFsWatch().then(
+            () => { pendingStarts--; onSettled(); },
+            (error) => { pendingStarts--; startErrors.push(error); onSettled(); },
+        );
+        startTasks.push(task);
+        return task;
+    };
+    const beginStop = (onSettled: () => void) => {
+        const task = peer.stop().then(
+            () => { onSettled(); },
+            (error) => { startErrors.push(error); onSettled(); },
+        );
+        stopTasks.push(task);
+        return task;
+    };
+
+    try {
+        Deno.watchFs = (() => {
+            const watcher = new ControlledDenoWatcher();
+            watchers.push(watcher);
+            return watcher as unknown as Deno.FsWatcher;
+        }) as typeof Deno.watchFs;
+
+        const initialStartDone = { value: false };
+        const initialStart = beginStart(() => { initialStartDone.value = true; });
+        await waitFor(() => watchers.length === 1, "the initial Deno watcher should be created");
+        await waitForDenoWatch(peer);
+
+        const path = join(tempDir, "accepted.md");
+        await Deno.writeTextFile(path, "held delivery");
+        await peer.dispatch(path);
+        await waitFor(() => dispatchEntered, "the real file dispatch should enter the held Hub callback");
+
+        const supersededStart = beginStart(() => { supersededStartDone = true; });
+        await waitFor(() => watchers[0].closeCalls > 0 && peer.watcherDeno === undefined,
+            "the older restart should close the current watcher before waiting for delivery");
+        await initialStart;
+        assert(initialStartDone.value, "the initial watcher start should finish after its watcher closes");
+        assert(!supersededStartDone, "the older restart should remain pending while delivery is held");
+
+        const newestStart = beginStart(() => { newestStartDone = true; });
+        await sleep(20);
+        assertEquals(watchers.length, 1, "no restart should reopen a watcher before the accepted delivery drains");
+
+        releaseDispatch.resolve();
+        await waitFor(() => supersededStartDone, "the superseded restart should settle without opening a watcher");
+        await waitFor(() => watchers.length === 2 && peer.watcherDeno === watchers[1] && peer.health().ok,
+            "only the newest start request should open the live watcher");
+        assertEquals(watchers.length, 2, "the initial and newest watcher should be the only watchers created");
+        assertEquals(peer.watcherDeno, watchers[1], "the newest request should own the only live watcher");
+        assert(dispatchCompleted, "the accepted file delivery should finish before the newest watcher starts");
+        assert(!newestStartDone, "the newest start should remain active while its watcher is live");
+        assertEquals(startErrors.length, 0, "all watcher start requests should finish without errors");
+
+        watchers[1].close();
+        await Promise.all([initialStart, supersededStart, newestStart]);
+        assert(newestStartDone, "closing the newest watcher should finish its start request");
+    } finally {
+        releaseDispatch.resolve();
+        // A failed assertion can leave a superseded request opening a watcher during cleanup.
+        while (pendingStarts > 0) {
+            for (const watcher of watchers) watcher.close();
+            await sleep(10);
+        }
+        for (const watcher of watchers) watcher.close();
+        const cleanupStop = beginStop(() => {});
+        await Promise.allSettled([...startTasks, ...stopTasks, cleanupStop]);
+        Deno.watchFs = originalWatchFs;
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+Deno.test("PeerStorage stop cancels a Deno watcher restart that is waiting for delivery drain", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-restart-stop-" });
+    const originalWatchFs = Deno.watchFs;
+    const watchers: ControlledDenoWatcher[] = [];
+    const peer = makePeer(tempDir);
+    const releaseDispatch = Promise.withResolvers<void>();
+    const startTasks: Promise<void>[] = [];
+    const stopTasks: Promise<void>[] = [];
+    const startErrors: unknown[] = [];
+    let pendingStarts = 0;
+    let dispatchEntered = false;
+    let dispatchCompleted = false;
+    let restartDone = false;
+    let stopDone = false;
+    peer.dispatchToHub = async () => {
+        dispatchEntered = true;
+        await releaseDispatch.promise;
+        dispatchCompleted = true;
+    };
+
+    const beginStart = (onSettled: () => void) => {
+        pendingStarts++;
+        const task = peer.startDenoFsWatch().then(
+            () => { pendingStarts--; onSettled(); },
+            (error) => { pendingStarts--; startErrors.push(error); onSettled(); },
+        );
+        startTasks.push(task);
+        return task;
+    };
+    const beginStop = (onSettled: () => void) => {
+        const task = peer.stop().then(
+            () => { onSettled(); },
+            (error) => { startErrors.push(error); onSettled(); },
+        );
+        stopTasks.push(task);
+        return task;
+    };
+
+    try {
+        Deno.watchFs = (() => {
+            const watcher = new ControlledDenoWatcher();
+            watchers.push(watcher);
+            return watcher as unknown as Deno.FsWatcher;
+        }) as typeof Deno.watchFs;
+
+        const initialStart = beginStart(() => {});
+        await waitFor(() => watchers.length === 1, "the initial Deno watcher should be created");
+        await waitForDenoWatch(peer);
+
+        const path = join(tempDir, "accepted.md");
+        await Deno.writeTextFile(path, "held delivery");
+        await peer.dispatch(path);
+        await waitFor(() => dispatchEntered, "the real file dispatch should enter the held Hub callback");
+
+        const restart = beginStart(() => { restartDone = true; });
+        await waitFor(() => watchers[0].closeCalls > 0 && peer.watcherDeno === undefined,
+            "the restart should close the current watcher before waiting for delivery");
+        await initialStart;
+        assert(!restartDone, "the restart should remain pending while delivery is held");
+
+        const stopping = beginStop(() => { stopDone = true; });
+        await sleep(20);
+        assert(!stopDone, "stop() should wait for the accepted delivery");
+        assertEquals(watchers.length, 1, "stop during the pending restart should not open another watcher");
+
+        releaseDispatch.resolve();
+        await waitFor(() => restartDone && stopDone,
+            "stop should invalidate the pending restart after the accepted delivery drains");
+        await Promise.all([initialStart, restart, stopping]);
+        assert(dispatchCompleted, "the accepted file delivery should complete before stop resolves");
+        assertEquals(watchers.length, 1, "the cancelled restart must not create another watcher");
+        assertEquals(peer.watcherDeno, undefined, "stop must leave no Deno watcher open");
+        assert(!peer.health().ok, "the stopped peer should remain unhealthy after the restart drains");
+        assertEquals(startErrors.length, 0, "the start and stop requests should finish without errors");
+    } finally {
+        releaseDispatch.resolve();
+        while (pendingStarts > 0) {
+            for (const watcher of watchers) watcher.close();
+            await sleep(10);
+        }
+        for (const watcher of watchers) watcher.close();
+        const cleanupStop = beginStop(() => {});
+        await Promise.allSettled([...startTasks, ...stopTasks, cleanupStop]);
         Deno.watchFs = originalWatchFs;
         await Deno.remove(tempDir, { recursive: true });
     }
