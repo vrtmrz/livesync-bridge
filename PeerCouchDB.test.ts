@@ -2,6 +2,7 @@ import { LOG_LEVEL_NOTICE } from "octagonal-wheels/common/logger";
 import type { DispatchFun } from "./Peer.ts";
 import { PeerCouchDB } from "./PeerCouchDB.ts";
 import { PeerStorage } from "./PeerStorage.ts";
+import { Hub } from "./Hub.ts";
 import type { FileData, PeerCouchDBConf, PeerStorageConf } from "./types.ts";
 
 function assertEquals<T>(actual: T, expected: T, message: string) {
@@ -202,4 +203,41 @@ Deno.test("advanceSince ignores a missing seq", () => {
     peer.advanceSince("");
     assertEquals(peer.getSetting("since"), "7", "stored position is kept");
     assertEquals(peer.man.since, "now", "man.since is kept");
+});
+
+for (const deleted of [false, true]) {
+    Deno.test(`CouchDB retries a rejected ${deleted ? "deletion" : "write"} through the hub`, async () => {
+        const hub = new Hub({ peers: [] });
+        const { peer: source } = makeSource(hub.dispatch.bind(hub));
+        const target = makeDestination("unused");
+        let attempts = 0;
+        const apply = async (path: string, value: FileData | false) => {
+            if (await target.isRepeating(path, value)) return false;
+            attempts++;
+            if (attempts === 1) throw new Error("Controlled destination failure");
+            return true;
+        };
+        target.put = apply;
+        target.delete = (path) => apply(path, false);
+        hub.peers = [source, target];
+        const deliver = () => deleted
+            ? source.dispatchDeleted("note.md")
+            : source.dispatch("note.md", emptyFileData(["note"], 4));
+        let rejected = false;
+        try { await deliver(); } catch { rejected = true; }
+        assert(rejected, "The first destination failure must reach the watcher");
+        await deliver();
+        assertEquals(attempts, 2, "The retry must reach the failed destination instead of its repeat cache");
+        await deliver();
+        assertEquals(attempts, 2, "A successful retry must still suppress repeats");
+    });
+}
+
+Deno.test("advanceSince retains the reconnect position when saving fails", () => {
+    const peer = makeSinceSource();
+    peer.setSetting = () => { throw new Error("Controlled storage failure"); };
+    let rejected = false;
+    try { peer.advanceSince("41-token"); } catch { rejected = true; }
+    assert(rejected, "Persistence failure must reach the watch checkpoint callback");
+    assertEquals(peer.man.since, "now", "A failed checkpoint write must retain the previous reconnect position");
 });

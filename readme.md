@@ -18,6 +18,20 @@ Of course, it is multi-directional!
 
 - [Deno](https://deno.com/) is required.
 
+### Path identity compatibility
+
+In the LiveSync clients which use a CouchDB database connected to the bridge,
+set **Unicode path identity** to **Legacy path identity**
+(`pathNormalizationVersion: 0`). This also applies to new environments where
+LiveSync selects NFC by default. Existing legacy environments can keep their
+setting. The bridge does not support **Unicode NFC path identity** (`1`).
+
+Changing the setting alone does not migrate a database which already uses NFC
+identity. The supported migration back to legacy identity is a coordinated
+Rebuild and Fetch from a complete, authoritative Vault. Back up the Vault and
+database, and stop synchronisation on all clients before that migration. Keep
+the bridge disconnected until the migration is complete.
+
 ## Simply run
 
 1. Clone the GitHub Repository
@@ -44,6 +58,13 @@ part of this identity. Existing checkpoints without a remote identity are not
 reused, so the first connection after upgrading reads remote changes from the
 beginning. Keep the Deno `localStorage` data to retain resume positions across
 restarts.
+
+CouchDB changes with unavailable chunks are retried from the source database, while
+failed deliveries are retried with capped backoff and other files continue. A newer
+change for the same document supersedes its pending read so a stale result cannot
+restore older content. The resume position advances through completed changes only;
+later changes can be replayed after restart if an earlier one keeps failing. Retries
+keep pending change metadata in memory and read file content from CouchDB as needed.
 
 # Docker Instructions
 

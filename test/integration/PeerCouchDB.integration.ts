@@ -1004,3 +1004,79 @@ for (const baseDir of ["", "blog/"]) {
         );
     }
 }
+
+Deno.test("CouchDB retries delayed chunks across three peers without checkpointing past them", async () => {
+    await waitForCouchDb();
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const database = `livesync_bridge_delayed_${suffix}`;
+    const created = await requestDatabase(database, "PUT");
+    assert(created.ok, "The isolated test database must be created");
+    const roots = [await Deno.makeTempDir(), await Deno.makeTempDir()];
+    const hub = new Hub({ peers: [] });
+    const settings = new Map<string, string>();
+    const source = new PeerCouchDB({
+        ...makeConfig(`delayed-${suffix}`, database), passphrase: "", obfuscatePassphrase: "",
+    }, hub.dispatch.bind(hub));
+    source.setSetting = (key, value) => { settings.set(key, value); };
+    source.getSetting = (key) => settings.get(key) ?? null;
+    const targets = roots.map((baseDir, index) => new PeerStorage({
+        type: "storage", name: `delayed-target-${index}`, baseDir,
+    }, async () => {}));
+    for (const target of targets) target.writeFileStat = async () => {};
+    hub.peers = [source, ...targets];
+    const put = async (doc: { _id: string; [key: string]: unknown }) => {
+        const response = await fetch(`${couchDbUrl}/${database}/${encodeURIComponent(doc._id)}`, {
+            method: "PUT", headers: { authorization: authHeader, "content-type": "application/json" },
+            body: JSON.stringify(doc),
+        });
+        assert(response.ok, `Fixture write must succeed: ${response.status} ${await response.text()}`);
+    };
+    const waitFor = async (predicate: () => boolean | Promise<boolean>, description: string) => {
+        const deadline = Date.now() + 60_000;
+        while (!await predicate()) {
+            assert(Date.now() < deadline, description);
+            await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+    };
+    const contents = async (name: string, expected: string) => {
+        try { return (await Promise.all(roots.map((root) => Deno.readTextFile(`${root}/${name}`)))).every((v) => v === expected); }
+        catch { return false; }
+    };
+    let failedLoads = 0;
+    let laterSequence: string | undefined;
+    try {
+        await put({ _id: MILESTONE_DOCID, created: 7 });
+        await source.start();
+        source.man.changes?.on("change", (change) => {
+            if (change.doc && "path" in change.doc && change.doc.path === "later.md") laterSequence = String(change.seq);
+        });
+        const originalRead = source.man.getByMeta.bind(source.man);
+        source.man.getByMeta = async (doc) => {
+            try { return await originalRead(doc); }
+            catch (error) { if (doc.path === "late.md") failedLoads++; throw error; }
+        };
+        const metadata = (path: string, child: string) => ({
+            _id: path, path, type: "plain", children: [child], ctime: 1, mtime: 2, size: 4,
+        });
+        await put(metadata("late.md", "h:delayed"));
+        await waitFor(() => failedLoads > 0, "The real chunk reader must fail before the chunk arrives");
+        await put({ _id: "h:available", type: "leaf", data: "next" });
+        await put(metadata("later.md", "h:available"));
+        await waitFor(() => contents("later.md", "next"), "The unrelated file must reach both destinations");
+        assert(laterSequence !== undefined, "The later metadata row must be observed in the feed");
+        // Compare the exact feed token; database-info tokens can encode the same position differently.
+        assert(source.getSetting("since") !== laterSequence, "The later file must not checkpoint past the missing chunk");
+        assert(!await contents("late.md", "late"), "The missing body must not be fabricated");
+        await put({ _id: "h:delayed", type: "leaf", data: "late" });
+        await waitFor(() => contents("late.md", "late"), "The late chunk must be retried without editing its metadata");
+        await waitFor(() => source.getSetting("since") === laterSequence, "Completion must release the checkpoint gap");
+        const metadataResponse = await fetch(`${couchDbUrl}/${database}/late.md`, { headers: { authorization: authHeader } });
+        const saved = await metadataResponse.json();
+        assert(saved._rev.startsWith("1-"), "Recovery must not require a metadata edit");
+    } finally {
+        await source.stop();
+        await source.man?.close();
+        await requestDatabase(database, "DELETE");
+        for (const root of roots) await Deno.remove(root, { recursive: true });
+    }
+});

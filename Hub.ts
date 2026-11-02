@@ -62,10 +62,16 @@ export class Hub {
         for (const peer of this.peers) {
             if (peer !== source && (source.config.group ?? "") === (peer.config.group ?? "")) {
                 let ret = false;
-                if (data === false) {
-                    ret = await peer.delete(path);
-                } else {
-                    ret = await peer.put(path, data);
+                try {
+                    if (data === false) {
+                        ret = await peer.delete(path);
+                    } else {
+                        ret = await peer.put(path, data);
+                    }
+                } catch (error) {
+                    // Peers record repeats before writing. Do not acknowledge a failed write on retry.
+                    peer.cache.clear();
+                    throw error;
                 }
                 if (ret) {
                     // Logger(`  ${data === false ? "-x->" : "--->"} ${peer.config.name} ${path} `)
