@@ -356,7 +356,7 @@ export class PeerCouchDB extends Peer {
             } else {
                 this.normalLog(`Watch starting from ${this.man.since}`);
             }
-            this.man.beginWatch(async (entry, seq) => {
+            this.man.beginWatch(async (entry) => {
                 const resolved = this._resolveMetadataPath(entry.path);
                 if (resolved && await this._canAccessPath(resolved)) {
                     const path = resolved.sharedPath;
@@ -370,19 +370,16 @@ export class PeerCouchDB extends Peer {
                         await this.dispatch(path, docData);
                     }
                 }
-                // Save this callback's position after dispatch or an explicit rejection.
-                this.advanceSince(seq);
-            }, (entry) => this._resolveMetadataPath(entry.path) !== false);
+            }, (entry) => this._resolveMetadataPath(entry.path) !== false,
+            (seq) => this.advanceSince(seq));
         }
     }
-    // Commonlib passes seq to the callback without updating man.since. Keep both
-    // the reconnect position and the peer's saved position after dispatch.
-    // Concurrent callbacks can still finish out of order, and earlier pending or
-    // failed changes are not guaranteed to be replayed by this checkpoint alone.
+    // Only Commonlib's acknowledged, contiguous position reaches this method.
+    // Persist it before moving the reconnect position so a storage error remains retryable.
     advanceSince(seq?: string | number): void {
         if (seq === undefined || seq === null || `${seq}` === "") return;
-        this.man.since = `${seq}`;
         this.setSetting("since", `${seq}`);
+        this.man.since = `${seq}`;
     }
     async dispatch(path: string, data: FileData | false) {
         if (data === false) return;
@@ -398,7 +395,13 @@ export class PeerCouchDB extends Peer {
             return;
         }
         if (!await this.isRepeating(path, data)) {
-            await this.dispatchToHub(this, path, data);
+            try {
+                await this.dispatchToHub(this, path, data);
+            } catch (error) {
+                // A rejected delivery must remain eligible for the watcher's retry.
+                this.cache.clear();
+                throw error;
+            }
         }
         // else {
         //     this.receiveLog(`${path} dispatch repeating`);
@@ -406,7 +409,12 @@ export class PeerCouchDB extends Peer {
     }
     async dispatchDeleted(path: string) {
         if (!await this.isRepeating(path, false)) {
-            await this.dispatchToHub(this, path, false);
+            try {
+                await this.dispatchToHub(this, path, false);
+            } catch (error) {
+                this.cache.clear();
+                throw error;
+            }
         }
     }
     async stop(): Promise<void> {

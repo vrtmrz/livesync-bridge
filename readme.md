@@ -45,6 +45,13 @@ reused, so the first connection after upgrading reads remote changes from the
 beginning. Keep the Deno `localStorage` data to retain resume positions across
 restarts.
 
+CouchDB changes with unavailable chunks are retried from the source database, while
+failed deliveries are retried with capped backoff and other files continue. A newer
+change for the same document supersedes its pending read so a stale result cannot
+restore older content. The resume position advances through completed changes only;
+later changes can be replayed after restart if an earlier one keeps failing. Retries
+keep pending change metadata in memory and read file content from CouchDB as needed.
+
 # Docker Instructions
 
 1. Clone the GitHub Repository

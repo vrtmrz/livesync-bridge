@@ -7,6 +7,17 @@ function assertEquals(actual: unknown, expected: unknown, message: string) {
     if (actual !== expected) throw new Error(`${message}: expected=${expected}, actual=${actual}`);
 }
 
+const activeWatches = new Set<DirectFileManipulator>();
+function checkpointTest(name: string, run: () => void | Promise<void>) {
+    Deno.test(name, async () => {
+        try { await run(); }
+        finally {
+            for (const man of activeWatches) man.endWatch();
+            activeWatches.clear();
+        }
+    });
+}
+
 function makePeer(settings = new Map<string, string>(), overrides: Partial<PeerCouchDBConf> = {}, dispatcher: DispatchFun = async () => {}) {
     const peer = new PeerCouchDB({
         type: "couchdb", name: "checkpoint-peer", baseDir: "",
@@ -28,7 +39,7 @@ for (const [description, overrides] of [
     ["base directory", { baseDir: "subfolder/" }],
     ["proxy path", { url: "https://one.example.test/other-proxy" }],
 ] as const) {
-    Deno.test(`CouchDB checkpoints are isolated by ${description}`, () => {
+    checkpointTest(`CouchDB checkpoints are isolated by ${description}`, () => {
         const settings = new Map<string, string>();
         const first = makePeer(settings);
         first.advanceSince("41-first");
@@ -44,7 +55,7 @@ for (const [description, overrides] of [
     });
 }
 
-Deno.test("CouchDB checkpoint identity normalises endpoints and excludes credentials", () => {
+checkpointTest("CouchDB checkpoint identity normalises endpoints and excludes credentials", () => {
     const settings = new Map<string, string>();
     const first = makePeer(settings, { url: "https://alice:old-secret@ONE.example.test:443/proxy/", password: "old-password" });
     first.advanceSince("41-token");
@@ -55,7 +66,7 @@ Deno.test("CouchDB checkpoint identity normalises endpoints and excludes credent
     assertEquals([...settings.keys()].some((key) => /alice|bob|secret|password/.test(key)), false, "Checkpoint keys must not contain credentials");
 });
 
-Deno.test("CouchDB checkpoint scopes cannot collide through separator characters", () => {
+checkpointTest("CouchDB checkpoint scopes cannot collide through separator characters", () => {
     const settings = new Map<string, string>();
     const first = makePeer(settings, { name: "alpha-couchdb-beta", baseDir: "gamma" });
     const other = makePeer(settings, { name: "alpha", baseDir: "beta-couchdb-gamma" });
@@ -63,7 +74,7 @@ Deno.test("CouchDB checkpoint scopes cannot collide through separator characters
     assertEquals(other.getSetting("since"), null, "Different peer scopes must remain separate even when legacy keys collide");
 });
 
-Deno.test("CouchDB checkpoint scoping preserves other peer setting keys", () => {
+checkpointTest("CouchDB checkpoint scoping preserves other peer setting keys", () => {
     const peer = makePeer();
     assertEquals(peer._getKey("other-setting"), "checkpoint-peer-couchdb--other-setting", "Unrelated settings must retain their existing keys");
 });
@@ -77,6 +88,7 @@ async function attachWatch(peer: PeerCouchDB, created: number | false = 7) {
     let onChange!: (event: Change) => Promise<void>;
     let startingSince: string | undefined;
     const feed = {
+        cancel() {},
         on(event: string, handler: unknown) {
             if (event === "change") onChange = handler as typeof onChange;
             return feed;
@@ -89,18 +101,23 @@ async function attachWatch(peer: PeerCouchDB, created: number | false = 7) {
         rawGet: () => Promise.resolve(created === false ? false : { created }),
         getByMeta: (doc: Change["doc"]) => Promise.resolve(doc),
         beginWatch: DirectFileManipulator.prototype.beginWatch,
+        endWatch: DirectFileManipulator.prototype.endWatch,
         liveSyncLocalDB: { localDatabase: { changes(options: { since: string }) { startingSince = options.since; return feed; } } },
     } as unknown as DirectFileManipulator;
+    activeWatches.add(peer.man);
     await (peer as unknown as { _connectAndWatch(): Promise<void> })._connectAndWatch();
     return {
         startingSince,
-        emit: (seq: string, deleted = false) => onChange({ seq, doc: {
-            _id: "note", path: "note.md", type: "plain", data: ["note"], size: 4, ctime: 1, mtime: 2, deleted,
-        } }),
+        emit: async (seq: string, deleted = false, path = "note.md") => {
+            await onChange({ seq, doc: {
+                _id: path, path, type: "plain", data: ["note"], size: 4, ctime: 1, mtime: 2, deleted,
+            } });
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        },
     };
 }
 
-Deno.test("CouchDB does not reuse legacy checkpoints without a remote identity", async () => {
+checkpointTest("CouchDB does not reuse legacy checkpoints without a remote identity", async () => {
     const settings = new Map([
         ["checkpoint-peer-couchdb--since", "999-old"],
         ["checkpoint-peer-couchdb--remote-created", "7"],
@@ -113,7 +130,7 @@ Deno.test("CouchDB does not reuse legacy checkpoints without a remote identity",
     assertEquals(settings.get("checkpoint-peer-couchdb--since"), "999-old", "Legacy state must be left untouched");
 });
 
-Deno.test("CouchDB persists a rebuilt database's reset before starting its feed", async () => {
+checkpointTest("CouchDB persists a rebuilt database's reset before starting its feed", async () => {
     const settings = new Map<string, string>();
     const peer = makePeer(settings);
     peer.setSetting("since", "100-old-database");
@@ -124,7 +141,7 @@ Deno.test("CouchDB persists a rebuilt database's reset before starting its feed"
     assertEquals(peer.getSetting("remote-created"), "8", "The new generation must be recorded");
 });
 
-Deno.test("CouchDB clears an old checkpoint when the remote is empty", async () => {
+checkpointTest("CouchDB clears an old checkpoint when the remote is empty", async () => {
     const peer = makePeer();
     peer.setSetting("since", "100-old-database");
     peer.setSetting("remote-created", "7");
@@ -134,7 +151,7 @@ Deno.test("CouchDB clears an old checkpoint when the remote is empty", async () 
     assertEquals(peer.getSetting("remote-created"), "0", "The empty remote marker must remain scoped to this peer");
 });
 
-Deno.test("CouchDB persists the feed sequence after dispatch and resumes a new peer from it", async () => {
+checkpointTest("CouchDB persists the feed sequence after dispatch and resumes a new peer from it", async () => {
     const settings = new Map<string, string>();
     const started = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
@@ -155,7 +172,7 @@ Deno.test("CouchDB persists the feed sequence after dispatch and resumes a new p
     assertEquals((await attachWatch(restarted)).startingSince, "41-token", "A new peer instance must resume from the saved position");
 });
 
-Deno.test("CouchDB does not advance the checkpoint of a rejected dispatch", async () => {
+checkpointTest("CouchDB does not advance the checkpoint of a rejected dispatch", async () => {
     const peer = makePeer(undefined, {}, () => Promise.reject(new Error("Controlled destination failure")));
     peer.setSetting("since", "40-token");
     peer.setSetting("remote-created", "7");
@@ -164,7 +181,7 @@ Deno.test("CouchDB does not advance the checkpoint of a rejected dispatch", asyn
     assertEquals(peer.getSetting("since"), "40-token", "A rejected dispatch must retain its own checkpoint");
 });
 
-Deno.test("CouchDB checkpoints a dispatched deletion", async () => {
+checkpointTest("CouchDB checkpoints a dispatched deletion", async () => {
     let deletion = false;
     const peer = makePeer(undefined, {}, (_source, _path, data) => { deletion = data === false; return Promise.resolve(); });
     peer.setSetting("remote-created", "7");
@@ -172,4 +189,24 @@ Deno.test("CouchDB checkpoints a dispatched deletion", async () => {
     await watch.emit("41-token", true);
     assertEquals(deletion, true, "The hub must receive the deletion");
     assertEquals(peer.getSetting("since"), "41-token", "A delivered deletion must advance the checkpoint");
+});
+
+checkpointTest("CouchDB retains a failed load when a later file is delivered", async () => {
+    const delivered: string[] = [];
+    const peer = makePeer(undefined, {}, (_source, path) => {
+        delivered.push(path);
+        return Promise.resolve();
+    });
+    peer.setSetting("since", "40-token");
+    peer.setSetting("remote-created", "7");
+    const watch = await attachWatch(peer);
+    const read = peer.man.getByMeta.bind(peer.man);
+    peer.man.getByMeta = (doc) => doc.path === "late.md"
+        ? Promise.reject(new Error("Controlled missing chunk"))
+        : read(doc);
+    await watch.emit("41-token", false, "late.md");
+    peer.man.getByMeta = read;
+    await watch.emit("42-token", false, "later.md");
+    assertEquals(delivered.length, 1, "The later readable file must still be delivered");
+    assertEquals(peer.getSetting("since"), "40-token", "A later delivery must not checkpoint past a failed load");
 });
