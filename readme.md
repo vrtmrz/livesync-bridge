@@ -18,6 +18,20 @@ Of course, it is multi-directional!
 
 - [Deno](https://deno.com/) is required.
 
+### Path identity compatibility
+
+In the LiveSync clients which use a CouchDB database connected to the bridge,
+set **Unicode path identity** to **Legacy path identity**
+(`pathNormalizationVersion: 0`). This also applies to new environments where
+LiveSync selects NFC by default. Existing legacy environments can keep their
+setting. The bridge does not support **Unicode NFC path identity** (`1`).
+
+Changing the setting alone does not migrate a database which already uses NFC
+identity. The supported migration back to legacy identity is a coordinated
+Rebuild and Fetch from a complete, authoritative Vault. Back up the Vault and
+database, and stop synchronisation on all clients before that migration. Keep
+the bridge disconnected until the migration is complete.
+
 ## Simply run
 
 1. Clone the GitHub Repository
