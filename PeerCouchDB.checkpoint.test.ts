@@ -38,6 +38,7 @@ for (const [description, overrides] of [
     ["peer", { name: "another-peer" }],
     ["base directory", { baseDir: "subfolder/" }],
     ["proxy path", { url: "https://one.example.test/other-proxy" }],
+    ["path identity", { pathNormalizationVersion: 1 }],
 ] as const) {
     checkpointTest(`CouchDB checkpoints are isolated by ${description}`, () => {
         const settings = new Map<string, string>();
@@ -209,4 +210,15 @@ checkpointTest("CouchDB retains a failed load when a later file is delivered", a
     await watch.emit("42-token", false, "later.md");
     assertEquals(delivered.length, 1, "The later readable file must still be delivered");
     assertEquals(peer.getSetting("since"), "40-token", "A later delivery must not checkpoint past a failed load");
+});
+
+checkpointTest("NFC checkpoint identity includes the configured filename case rule", () => {
+    const settings = new Map<string, string>();
+    const sensitive = makePeer(settings, { pathNormalizationVersion: 1, handleFilenameCaseSensitive: true });
+    sensitive.advanceSince("41-sensitive");
+    sensitive.setSetting("remote-created", "7");
+    const insensitive = makePeer(settings, { pathNormalizationVersion: 1, handleFilenameCaseSensitive: false });
+    assertEquals(insensitive.getSetting("since"), null, "Another NFC case rule must not reuse the sequence");
+    const restored = makePeer(settings, { pathNormalizationVersion: 1, handleFilenameCaseSensitive: true });
+    assertEquals(restored.getSetting("since"), "41-sensitive", "The matching NFC policy must restore its sequence");
 });

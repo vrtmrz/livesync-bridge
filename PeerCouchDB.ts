@@ -9,6 +9,7 @@ import { decodeBinary } from "@vrtmrz/livesync-commonlib/compat/string_and_binar
 import { isPlainText } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/path";
 import { DispatchFun, Peer, PeerHealth } from "./Peer.ts";
 import { normaliseIdDerivationKey } from "./util.ts";
+import { getPeerPathNormalizationVersion } from "./pathIdentity.ts";
 import {
     createBinaryBlob,
     createTextBlob,
@@ -54,7 +55,10 @@ export class PeerCouchDB extends Peer {
         const url = new URL(this.config.url);
         // Include reverse-proxy paths, but keep credentials out of persisted keys.
         const endpoint = `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
-        return `couchdb-checkpoint:${JSON.stringify([this.config.name, this.config.baseDir, endpoint, this.config.database, key])}`;
+        const pathIdentity = getPeerPathNormalizationVersion(this.config) === 1
+            ? [1, this.config.handleFilenameCaseSensitive ?? false]
+            : [];
+        return `couchdb-checkpoint:${JSON.stringify([this.config.name, this.config.baseDir, endpoint, this.config.database, key, ...pathIdentity])}`;
     }
     // (Re)create the underlying DirectFileManipulator. Its constructor starts a
     // one-shot async database initialisation. Recovering from a failed attempt

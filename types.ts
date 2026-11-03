@@ -5,7 +5,11 @@ export interface Config {
 }
 export type PeerConf = PeerStorageConf | PeerCouchDBConf;
 
-export interface PeerStorageConf {
+export interface PeerPathIdentityConf {
+    pathNormalizationVersion?: 0 | 1;
+}
+
+export interface PeerStorageConf extends PeerPathIdentityConf {
     scanOfflineChanges?: boolean;
     type: "storage";
     group?: string;
@@ -18,8 +22,9 @@ export interface PeerStorageConf {
     useChokidar?: boolean;
     /** Glob patterns for paths which are never synchronised, e.g. [".git/**"] */
     ignore?: string[];
+    handleFilenameCaseSensitive?: boolean;
 }
-export interface PeerCouchDBConf extends DirectFileManipulatorOptions {
+export interface PeerCouchDBConf extends DirectFileManipulatorOptions, PeerPathIdentityConf {
     /** Vault-root glob patterns for hidden i: files, selected in both directions, e.g. [".claude/**"]. */
     includeInternal?: string[];
     type: "couchdb";

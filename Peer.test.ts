@@ -69,3 +69,18 @@ Deno.test("Peer repetition cache distinguishes first and repeated data", async (
     assert(await peer.isRepeating("note.md", data), "same data on the same path should be repeating");
     assert(!(await peer.isRepeating("other.md", data)), "same data on a different path should not be repeating");
 });
+
+Deno.test("NFC repetition keys retain Unicode identity and the selected case rule", async () => {
+    const peer = new TestPeer();
+    peer.config.pathNormalizationVersion = 1;
+    peer.config.handleFilenameCaseSensitive = true;
+    const data: FileData = { ctime: 1, mtime: 1, size: 5, data: ["hello"] };
+    assert(!(await peer.isRepeating("Résumé.md".normalize("NFD"), data)), "The first native observation must be recorded");
+    assert(await peer.isRepeating("Résumé.md", data), "NFC-equivalent spelling must use the same identity");
+    assert(!(await peer.isRepeating("résumé.md", data)), "Case-sensitive names must remain distinct");
+    const insensitive = new TestPeer();
+    insensitive.config.pathNormalizationVersion = 1;
+    insensitive.config.handleFilenameCaseSensitive = false;
+    await insensitive.isRepeating("Résumé.md", data);
+    assert(await insensitive.isRepeating("RÉSUMÉ.MD".normalize("NFD"), data), "Case-insensitive NFC names must share the key");
+});

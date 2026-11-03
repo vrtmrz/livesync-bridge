@@ -20,17 +20,82 @@ Of course, it is multi-directional!
 
 ### Path identity compatibility
 
-In the LiveSync clients which use a CouchDB database connected to the bridge,
-set **Unicode path identity** to **Legacy path identity**
-(`pathNormalizationVersion: 0`). This also applies to new environments where
-LiveSync selects NFC by default. Existing legacy environments can keep their
-setting. The bridge does not support **Unicode NFC path identity** (`1`).
+Unicode NFC support is an unreleased addition which requires the Commonlib
+package containing the `/storage` entry and the direct-file path identity
+option. Published Commonlib `0.3.0` still requires Legacy identity for Bridge.
 
-Changing the setting alone does not migrate a database which already uses NFC
-identity. The supported migration back to legacy identity is a coordinated
-Rebuild and Fetch from a complete, authoritative Vault. Back up the Vault and
-database, and stop synchronisation on all clients before that migration. Keep
-the bridge disconnected until the migration is complete.
+Each peer selects `pathNormalizationVersion`:
+
+- omitted or `0` retains **Legacy path identity**;
+- `1` selects **Unicode NFC path identity**; and
+- any other value is rejected.
+
+Peers with the same `group` must select the same version before they start.
+An omitted group is the shared empty group. Independent groups can select
+different versions. The CouchDB database and its participating LiveSync clients
+must use the selected version too. The bridge does not adopt another identity
+silently from remote tweaks.
+
+`handleFilenameCaseSensitive` remains separate from Unicode normalisation.
+On storage peers it controls NFC name comparison; Legacy keeps its existing
+native path behaviour. On CouchDB peers it controls the existing document-ID
+case rule. Choose the same case rule as the participating LiveSync clients.
+The default is `false`.
+
+For example, an NFC group with case-sensitive names can use:
+
+```jsonc
+{
+  "peers": [
+    {
+      "name": "notes-files",
+      "type": "storage",
+      "group": "notes",
+      "baseDir": "./vault",
+      "pathNormalizationVersion": 1,
+      "handleFilenameCaseSensitive": true
+    },
+    {
+      "name": "notes-database",
+      "type": "couchdb",
+      "group": "notes",
+      "baseDir": "",
+      "url": "https://couchdb.example.com",
+      "database": "notes",
+      "username": "<username>",
+      "password": "<password>",
+      "passphrase": "",
+      "obfuscatePassphrase": "",
+      "pathNormalizationVersion": 1,
+      "handleFilenameCaseSensitive": true
+    }
+  ]
+}
+```
+
+NFC storage resolves each existing file and parent using its actual directory
+name. Ordinary writes preserve those physical names; missing components retain
+the requested spelling. Multiple names which have the same NFC and case
+comparison key are ambiguous, including an exact-match request. Reads, writes,
+and deletions reject the ambiguity before changing a file. Symbolic-link
+components are not followed in NFC mode. Permission and I/O failures remain
+failed operations rather than evidence of absence or successful delivery.
+
+Both Deno and Chokidar watchers retain event paths. An old deletion event does
+not remove a database entry while an equivalent live spelling remains. NFC
+inventories validate aliases before reporting the watcher healthy, and queued
+notifications from a stopped watcher are discarded. NFC file observations and
+CouchDB resume positions include the selected identity policy, so a Legacy
+observation or checkpoint cannot suppress the initial NFC read. Existing Legacy
+state remains available under its existing keys.
+
+Changing this setting alone does not migrate an existing database. Preserve a
+complete, authoritative Vault, unique local edits, and required history, stop
+synchronisation on all clients, and use LiveSync's coordinated Rebuild and Fetch
+procedure before reconnecting Bridge with the matching mode. The bridge does
+not rewrite document IDs or merge histories in place. The existing
+`scanOfflineChanges` option still controls whether the initial storage inventory
+uploads local content.
 
 ## Simply run
 

@@ -4,6 +4,8 @@ import { PeerConf, FileData } from "./types.ts";
 import { Logger, LOG_LEVEL_DEBUG, LOG_LEVEL_INFO, type LOG_LEVEL } from "octagonal-wheels/common/logger";
 import { LRUCache } from "octagonal-wheels/memory/LRUCache";
 import { computeHash } from "./util.ts";
+import { getStoragePathComparisonKey, parseFilePath, type PathComparisonSettings } from "@vrtmrz/livesync-commonlib/storage";
+import { getPeerPathNormalizationVersion } from "./pathIdentity.ts";
 
 export type DispatchFun = (source: Peer, path: string, data: FileData | false) => Promise<void>;
 
@@ -91,13 +93,22 @@ export abstract class Peer {
     abstract start(): Promise<void>;
     abstract stop(): Promise<void>;
     cache = new LRUCache<string, string>(300, 10000000, true);
-    async isRepeating(path: string, data: FileData | false) {
+    protected pathIdentityKey(path: string, policy?: PathComparisonSettings): string {
+        const snapshot = policy ?? {
+            pathNormalizationVersion: getPeerPathNormalizationVersion(this.config),
+            handleFilenameCaseSensitive: this.config.handleFilenameCaseSensitive ?? false,
+        };
+        if (snapshot.pathNormalizationVersion === 0) return path;
+        return getStoragePathComparisonKey(parseFilePath(path), snapshot);
+    }
+    async isRepeating(path: string, data: FileData | false, policy?: PathComparisonSettings) {
+        const key = this.pathIdentityKey(path, policy);
         const d = await computeHash(data === false ? ["\u0001Deleted"] : data.data);
 
-        if (this.cache.has(path) && this.cache.get(path) == d) {
+        if (this.cache.has(key) && this.cache.get(key) == d) {
             return true;
         }
-        this.cache.set(path, d);
+        this.cache.set(key, d);
         return false;
     }
     receiveLog(message: string, level?: LOG_LEVEL) {

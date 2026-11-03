@@ -2,6 +2,7 @@ import { Config, FileData } from "./types.ts";
 import { Peer, PeerHealth } from "./Peer.ts";
 import { PeerStorage } from "./PeerStorage.ts";
 import { PeerCouchDB } from "./PeerCouchDB.ts";
+import { validatePeerPathIdentity } from "./pathIdentity.ts";
 
 
 export class Hub {
@@ -21,6 +22,7 @@ export class Hub {
         return { ok, restartWorthy, peers };
     }
     start() {
+        validatePeerPathIdentity(this.conf);
         for (const p of this.peers) {
             p.stop();
         }
