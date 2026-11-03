@@ -2,6 +2,7 @@ import type { DirectFileManipulatorOptions } from "@vrtmrz/livesync-commonlib";
 
 export interface Config {
     peers: PeerConf[];
+    disableCheckingConfigMismatch?: boolean;
 }
 export type PeerConf = PeerStorageConf | PeerCouchDBConf;
 

@@ -118,28 +118,37 @@ Deno.test("PeerCouchDB retains internal-file access after remote tweaks and a re
         created: 1,
         tweak_values: { PREFERRED: {} },
       })) as typeof man.rawGet;
-    let initialised = false;
-    man.liveSyncLocalDB.initializeDatabase = () => {
-      initialised = true;
-      assertEquals(
-        man.settings.syncInternalFiles,
-        true,
-        "Remote tweaks must preserve the permission before reinitialising the database",
-      );
-      return Promise.resolve(true);
+    const beginWatch = DirectFileManipulator.prototype.beginWatch;
+    let watched: DirectFileManipulator | undefined;
+    DirectFileManipulator.prototype.beginWatch = function () {
+      watched = this;
+      return false;
     };
-    man.beginWatch = () => false;
-    await (peer as unknown as InternalPeer)._connectAndWatch();
-    assertEquals(
-      initialised,
-      true,
-      "The remote-tweak path must reinitialise the database",
-    );
-    (peer as unknown as InternalPeer)._buildManipulator();
-    assertEquals(
-      peer.man.settings.syncInternalFiles,
-      true,
-      "A replacement manipulator must preserve the includeInternal permission",
-    );
+    try {
+      await (peer as unknown as InternalPeer)._connectAndWatch();
+      assertEquals(
+        watched?.settings.syncInternalFiles,
+        true,
+        "The manipulator which starts watching must retain internal-file permission",
+      );
+      assertEquals(
+        watched?.services.setting.currentSettings().syncInternalFiles,
+        true,
+        "The watching database services must receive the same internal-file permission",
+      );
+      (peer as unknown as InternalPeer)._buildManipulator();
+      assertEquals(
+        peer.man.settings.syncInternalFiles,
+        true,
+        "A replacement manipulator must preserve the includeInternal permission",
+      );
+      assertEquals(
+        peer.man.services.setting.currentSettings().syncInternalFiles,
+        true,
+        "Replacement database services must preserve the includeInternal permission",
+      );
+    } finally {
+      DirectFileManipulator.prototype.beginWatch = beginWatch;
+    }
   });
 });

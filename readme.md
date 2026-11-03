@@ -24,6 +24,12 @@ Unicode NFC support is an unreleased addition which requires the Commonlib
 package containing the `/storage` entry and the direct-file path identity
 option. Published Commonlib `0.3.0` still requires Legacy identity for Bridge.
 
+Publish and validate the required immutable Commonlib package before releasing
+this Bridge integration. Then replace the provisional package version in every
+Commonlib import and regenerate `deno.lock` from the registry. Follow the
+[Commonlib and application release order](https://github.com/vrtmrz/livesync-commonlib/blob/main/docs/releasing.md#coordinating-package-and-application-releases);
+a local package overlay does not establish registry installation readiness.
+
 Each peer selects `pathNormalizationVersion`:
 
 - omitted or `0` retains **Legacy path identity**;
@@ -40,7 +46,40 @@ silently from remote tweaks.
 On storage peers it controls NFC name comparison; Legacy keeps its existing
 native path behaviour. On CouchDB peers it controls the existing document-ID
 case rule. Choose the same case rule as the participating LiveSync clients.
-The default is `false`.
+The default is `false`. Legacy and NFC groups are checked for agreement before
+startup and before transfers. A CouchDB peer also compares its effective case
+rule with the remote preferred setting before watching. An omitted remote case
+value means `false`.
+
+`useRemoteTweaks: true` explicitly adopts the remote settings, preferring the
+`PREFERRED` entry and retaining the first entry as a fallback for older
+milestones. The adopted case rule is checked against the group before the
+changes feed starts. Adoption updates that CouchDB peer; it does not rewrite
+storage peers or migrate document IDs.
+
+Document-ID admission runs before remote tweaks are read. For a database with
+obfuscated document IDs, set `handleFilenameCaseSensitive` to the database's
+existing value in the initial peer configuration: `useRemoteTweaks` cannot
+correct an initial case rule which fails that admission check. The mismatch
+override below also retains this prerequisite.
+
+For migration compatibility, the top-level `disableCheckingConfigMismatch`
+option defaults to `false`. Set it to `true` to permit filename-case differences
+within groups and against remote settings:
+
+```jsonc
+{
+  "disableCheckingConfigMismatch": true,
+  "peers": [ /* Existing peer configuration */ ]
+}
+```
+
+This override preserves each peer's effective case rule. It does not align
+names, migrate data, bypass alias checks, or permit different
+`pathNormalizationVersion` values in one group or against the database. Keep
+case rules consistent for normal operation. Bridge currently uses this option
+for filename-case checks; existing document-ID admission, encryption, and
+compression checks retain their behaviour.
 
 For example, an NFC group with case-sensitive names can use:
 

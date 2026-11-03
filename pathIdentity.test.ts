@@ -96,3 +96,45 @@ Deno.test("path identity validation permits different modes in independent group
     };
     validatePeerPathIdentity(config);
 });
+
+for (const version of [0, 1] as const) {
+    Deno.test(`filename case validation rejects different effective values in version ${version}`, () => {
+        const config: Config = {
+            peers: [
+                storagePeer("default", { pathNormalizationVersion: version }),
+                storagePeer("sensitive", { pathNormalizationVersion: version, handleFilenameCaseSensitive: true }),
+            ],
+        };
+        assertThrows(() => validatePeerPathIdentity(config), "A group must reject different effective case rules");
+    });
+}
+
+Deno.test("filename case validation treats omitted and false as equal", () => {
+    validatePeerPathIdentity({
+        peers: [storagePeer("default"), storagePeer("explicit", { handleFilenameCaseSensitive: false })],
+    });
+});
+
+Deno.test("filename case validation permits independent groups", () => {
+    validatePeerPathIdentity({
+        peers: [
+            storagePeer("default", { group: "first" }),
+            storagePeer("sensitive", { group: "second", handleFilenameCaseSensitive: true }),
+        ],
+    });
+});
+
+Deno.test("configuration mismatch override permits different case rules without rewriting them", () => {
+    const peers = [storagePeer("default"), storagePeer("sensitive", { handleFilenameCaseSensitive: true })];
+    validatePeerPathIdentity(Object.assign({ peers }, { disableCheckingConfigMismatch: true }));
+    assertEquals(peers[0].handleFilenameCaseSensitive, undefined, "Override must not rewrite an omitted value");
+    assertEquals(peers[1].handleFilenameCaseSensitive, true, "Override must preserve the configured case rule");
+});
+
+Deno.test("configuration mismatch override does not permit different path identity versions", () => {
+    const peers = [storagePeer("legacy"), storagePeer("nfc", { pathNormalizationVersion: 1 })];
+    assertThrows(
+        () => validatePeerPathIdentity(Object.assign({ peers }, { disableCheckingConfigMismatch: true })),
+        "Identity mode agreement remains mandatory",
+    );
+});

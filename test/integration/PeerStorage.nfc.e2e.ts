@@ -9,6 +9,7 @@ import {
 import { getDocData } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import { Hub } from "../../Hub.ts";
 import { PeerCouchDB } from "../../PeerCouchDB.ts";
+import { validatePeerPathIdentity } from "../../pathIdentity.ts";
 import type { FileData, PeerCouchDBConf, PeerStorageConf } from "../../types.ts";
 import { watcherTest } from "./watcherTest.ts";
 
@@ -310,6 +311,143 @@ watcherTest("standard", {
                 const deletion = await request(database, "", { method: "DELETE" });
                 await deletion.body?.cancel();
             }
+        }
+    },
+});
+
+watcherTest("standard", {
+    name: "Filename case mismatches reject before watching and the explicit override permits migration round trips",
+    sanitizeOps: false,
+    sanitizeResources: false,
+    async fn() {
+        const suffix = crypto.randomUUID().replaceAll("-", "");
+        const database = `bridge_case_${suffix}`;
+        const root = await Deno.makeTempDir({ prefix: "bridge-case-e2e-" });
+        const path = "Résumé.md";
+        const remote = config(`remote-${suffix}`, database, false);
+        const storage: PeerStorageConf = {
+            type: "storage",
+            name: `storage-${suffix}`,
+            baseDir: root,
+            group: "nfc",
+            pathNormalizationVersion: 1,
+            scanOfflineChanges: true,
+        };
+        let writer: DirectFileManipulator | undefined;
+        let hub: Hub | undefined;
+        let created = false;
+        try {
+            const creation = await request(database, "", { method: "PUT" });
+            assert(creation.ok, "The isolated database must be created");
+            await creation.body?.cancel();
+            created = true;
+            const milestone = await request(database, `/${MILESTONE_DOCID}`, {
+                method: "PUT",
+                body: JSON.stringify({
+                    _id: MILESTONE_DOCID,
+                    created: Date.now(),
+                    tweak_values: {
+                        PREFERRED: {
+                            ...TweakValuesTemplate,
+                            pathNormalizationVersion: 1,
+                            handleFilenameCaseSensitive: true,
+                        },
+                    },
+                }),
+            });
+            assert(milestone.ok, "The remote preferred settings must be created");
+            await milestone.body?.cancel();
+            writer = new DirectFileManipulator(remote, { fetch: (input, init) => globalThis.fetch(input, init) });
+            await writer.ready.promise;
+            await writeRemote(writer, path, "retained remote bytes");
+            const id = await writer.path2id(path as FilePathWithPrefix);
+            const initial = await revision(database, id);
+
+            for (const adopt of [false, true]) {
+                const probeConfig = {
+                    ...remote,
+                    name: `probe-${adopt}-${suffix}`,
+                    handleFilenameCaseSensitive: false,
+                    ...(adopt ? { useRemoteTweaks: true as const } : {}),
+                };
+                const probe = new PeerCouchDB(probeConfig, async () => {}, {
+                    validateConfiguration: () => validatePeerPathIdentity({ peers: [probeConfig, storage] }),
+                });
+                probe.man = new DirectFileManipulator(probeConfig, {
+                    fetch: (input, init) => globalThis.fetch(input, init),
+                });
+                try {
+                    await probe.man.ready.promise;
+                    const before = await (await request(database)).json();
+                    let rejection = "";
+                    try {
+                        await (probe as unknown as { _connectAndWatch(): Promise<void> })._connectAndWatch();
+                    } catch (error) {
+                        rejection = String(error);
+                    }
+                    assert(
+                        rejection.includes("handleFilenameCaseSensitive"),
+                        "A remote or adopted group mismatch must reject for the case rule",
+                    );
+                    assert(!probe.man.watching, "Mismatch rejection must precede the changes feed");
+                    const after = await (await request(database)).json();
+                    assert(before.update_seq === after.update_seq, "Rejected mismatch must not mutate the remote");
+                    assert(
+                        (await remoteText(writer, path)) === "retained remote bytes",
+                        "Rejected mismatch must retain the original content",
+                    );
+                } finally {
+                    await probe.man.close();
+                }
+            }
+
+            const adoptedRemote: PeerCouchDBConf = {
+                ...remote,
+                handleFilenameCaseSensitive: false,
+                useRemoteTweaks: true,
+            };
+            hub = new Hub({ peers: [adoptedRemote, storage], disableCheckingConfigMismatch: true });
+            hub.start();
+            await waitFor(
+                () => hub!.peers.length === 2 && hub!.peers.every((peer) => peer.health().ok),
+                "The explicit override must allow the group to start",
+            );
+            await waitFor(
+                () => fileEquals(join(root, path), "retained remote bytes"),
+                "The remote content must reach storage with the override",
+            );
+            assert(
+                adoptedRemote.handleFilenameCaseSensitive === true,
+                "Explicit remote adoption must apply the preferred value",
+            );
+            assert(
+                storage.handleFilenameCaseSensitive === undefined,
+                "The override must not rewrite another peer's setting",
+            );
+            const effectiveRemote = hub.peers.find((peer) => peer instanceof PeerCouchDB) as PeerCouchDB;
+            assert(
+                (await effectiveRemote.man.path2id(path as FilePathWithPrefix)) === id,
+                "Adopted settings must derive the original remote Metadata ID before the next write",
+            );
+            await Deno.writeTextFile(join(root, path), "local migration edit");
+            await waitFor(
+                async () => (await remoteText(writer!, path)) === "local migration edit",
+                "A local update must reach the same remote file with the override",
+            );
+            const updated = await revision(database, id);
+            assert(updated.parent === initial.rev, "The local update must preserve the original revision ancestry");
+        } finally {
+            if (hub) {
+                await stopHub(hub);
+                for (const peer of hub.peers) if (peer instanceof PeerCouchDB) await peer.man.close();
+            }
+            await writer?.close();
+            await sleep(350);
+            if (created) {
+                const deletion = await request(database, "", { method: "DELETE" });
+                await deletion.body?.cancel();
+            }
+            await Deno.remove(root, { recursive: true });
         }
     },
 });

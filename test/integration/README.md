@@ -23,7 +23,10 @@ on and off, and both filename case policies. It checks NFD names, remote NFC
 requests, native edits, explicit spelling renames, exact revision ancestry,
 restart delivery, and parent deletion. A separate case requires NFC admission
 over populated Legacy Metadata to fail without changing the database or its
-readable content.
+readable content. The migration scenario checks rejection before the changes
+feed for both direct remote mismatch and mismatch introduced by explicit tweak
+adoption. The top-level mismatch override then permits a real round trip while
+retaining each peer's case setting and the original Metadata revision ancestry.
 
 Root unit tests cover default Legacy settings, invalid versions, group
 agreement, cache and checkpoint identity, aliases after earlier cache hits,
