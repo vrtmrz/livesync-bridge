@@ -2,6 +2,7 @@ import { DirectFileManipulator } from "@vrtmrz/livesync-commonlib";
 import {
     type FilePathWithPrefix,
     MILESTONE_DOCID,
+    DEVICE_ID_PREFERRED,
     type TweakValues,
 } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import { PeerCouchDBConf, FileData } from "./types.ts";
@@ -9,6 +10,7 @@ import { decodeBinary } from "@vrtmrz/livesync-commonlib/compat/string_and_binar
 import { isPlainText } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/path";
 import { DispatchFun, Peer, PeerHealth } from "./Peer.ts";
 import { normaliseIdDerivationKey } from "./util.ts";
+import { assertPeerMatchesRemoteCase, getPeerPathNormalizationVersion } from "./pathIdentity.ts";
 import {
     createBinaryBlob,
     createTextBlob,
@@ -28,6 +30,11 @@ type ResolvedCouchDBPath = {
     internal: boolean;
 };
 
+type PeerCouchDBRuntimeOptions = {
+    disableCheckingConfigMismatch?: boolean;
+    validateConfiguration?: () => void;
+};
+
 // export class PeerInstance()
 
 export class PeerCouchDB extends Peer {
@@ -36,7 +43,7 @@ export class PeerCouchDB extends Peer {
     private _started = promiseWithResolver<void>();
     private _connected = false;
     private _remoteEmpty = false;
-    constructor(conf: PeerCouchDBConf, dispatcher: DispatchFun) {
+    constructor(conf: PeerCouchDBConf, dispatcher: DispatchFun, private readonly runtimeOptions: PeerCouchDBRuntimeOptions = {}) {
         super(conf, dispatcher);
         const idDerivationKey = normaliseIdDerivationKey(this.config.idDerivationKey);
         this.config.idDerivationKey = idDerivationKey;
@@ -54,7 +61,10 @@ export class PeerCouchDB extends Peer {
         const url = new URL(this.config.url);
         // Include reverse-proxy paths, but keep credentials out of persisted keys.
         const endpoint = `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
-        return `couchdb-checkpoint:${JSON.stringify([this.config.name, this.config.baseDir, endpoint, this.config.database, key])}`;
+        const pathIdentity = getPeerPathNormalizationVersion(this.config) === 1
+            ? [1, this.config.handleFilenameCaseSensitive ?? false]
+            : [];
+        return `couchdb-checkpoint:${JSON.stringify([this.config.name, this.config.baseDir, endpoint, this.config.database, key, ...pathIdentity])}`;
     }
     // (Re)create the underlying DirectFileManipulator. Its constructor starts a
     // one-shot async database initialisation. Recovering from a failed attempt
@@ -292,9 +302,11 @@ export class PeerCouchDB extends Peer {
         {
             await this._waitReady(15000);
             const w = await this.man.rawGet<Record<string, any>>(MILESTONE_DOCID);
-            if (w && "tweak_values" in w) {
+            const tweaks = w && "tweak_values" in w
+                ? (w.tweak_values[DEVICE_ID_PREFERRED] ?? Object.values(w.tweak_values)[0]) as TweakValues | undefined
+                : undefined;
+            if (tweaks) {
                 if (this.config.useRemoteTweaks) {
-                    const tweaks = Object.values(w["tweak_values"])[0] as TweakValues;
                     // console.log(tweaks)
                     const orgConf = { ...this.config } as Record<string, any>;
                     this.config.customChunkSize = tweaks.customChunkSize ?? this.config.customChunkSize;
@@ -320,13 +332,10 @@ export class PeerCouchDB extends Peer {
                     this.config.minimumChunkSize = tweaks.minimumChunkSize ?? this.config.minimumChunkSize;
                     this.config.customChunkSize = tweaks.customChunkSize ?? this.config.customChunkSize;
                     this.config.doNotUseFixedRevisionForChunks = tweaks.doNotUseFixedRevisionForChunks ?? this.config.doNotUseFixedRevisionForChunks;
-                    this.config.handleFilenameCaseSensitive = tweaks.handleFilenameCaseSensitive ?? this.config.handleFilenameCaseSensitive;
+                    this.config.handleFilenameCaseSensitive = tweaks.handleFilenameCaseSensitive ?? false;
                     this.config.idDerivationVersion = tweaks.idDerivationVersion ?? this.config.idDerivationVersion;
                     this.config.encryptInternalMetadata = tweaks.encryptInternalMetadata ?? this.config.encryptInternalMetadata;
                     const newConf = { ...this.config } as Record<string, any>;
-                    this.man.options = this.config;
-                    await this.man.liveSyncLocalDB.initializeDatabase()
-                    // await this.man.managers.initManagers();
                     const diff = unique([...Object.keys(orgConf), ...Object.keys(tweaks)]).filter(k => orgConf[k] != newConf[k]);
                     if (diff.length > 0) {
                         this.normalLog(`Remote tweaks changed --->`);
@@ -336,7 +345,16 @@ export class PeerCouchDB extends Peer {
                         this.normalLog(`<--- Remote tweaks changed`);
                     }
                 }
+                assertPeerMatchesRemoteCase(this.config, tweaks, this.runtimeOptions.disableCheckingConfigMismatch === true);
             }
+            this.runtimeOptions.validateConfiguration?.();
+            if (tweaks && this.config.useRemoteTweaks) {
+                // A fresh manipulator applies the adopted policy to all service settings and database managers.
+                this._buildManipulator();
+                await this._waitReady(15000);
+            }
+            // Remote tweak adoption can select another NFC checkpoint namespace.
+            this.man.since = this.getSetting("since") ?? "";
             if (!w) {
                 this.normalLog(`Remote database looks like empty. fetch from the first.`);
                 this.man.since = "";

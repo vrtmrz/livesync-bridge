@@ -2,6 +2,7 @@ import { Config, FileData } from "./types.ts";
 import { Peer, PeerHealth } from "./Peer.ts";
 import { PeerStorage } from "./PeerStorage.ts";
 import { PeerCouchDB } from "./PeerCouchDB.ts";
+import { validatePeerPathIdentity } from "./pathIdentity.ts";
 
 
 export class Hub {
@@ -21,13 +22,17 @@ export class Hub {
         return { ok, restartWorthy, peers };
     }
     start() {
+        validatePeerPathIdentity(this.conf);
         for (const p of this.peers) {
             p.stop();
         }
         this.peers = [];
         for (const peer of this.conf.peers) {
             if (peer.type == "couchdb") {
-                const p = new PeerCouchDB(peer, this.dispatch.bind(this));
+                const p = new PeerCouchDB(peer, this.dispatch.bind(this), {
+                    disableCheckingConfigMismatch: this.conf.disableCheckingConfigMismatch,
+                    validateConfiguration: () => validatePeerPathIdentity(this.conf),
+                });
                 this.peers.push(p);
             } else if (peer.type == "storage") {
                 const p = new PeerStorage(peer, this.dispatch.bind(this));
@@ -59,6 +64,7 @@ export class Hub {
     }
 
     async dispatch(source: Peer, path: string, data: FileData | false) {
+        validatePeerPathIdentity(this.conf);
         for (const peer of this.peers) {
             if (peer !== source && (source.config.group ?? "") === (peer.config.group ?? "")) {
                 let ret = false;
