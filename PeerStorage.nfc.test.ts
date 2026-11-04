@@ -216,6 +216,46 @@ Deno.test("NFC write failures propagate and do not acknowledge an unsaved retry"
     }
 });
 
+Deno.test("NFC writes reject a symlinked parent without changing outside bytes when symlinks are supported", async () => {
+    const root = await Deno.makeTempDir();
+    const outside = await Deno.makeTempDir();
+    const { peer } = makePeer(root);
+    const sentinel = new Uint8Array([0, 255, 10, 0, 195, 169]);
+    try {
+        await Deno.writeFile(join(outside, "sentinel.bin"), sentinel);
+        try {
+            await Deno.symlink(outside, join(root, "redirect"), { type: "dir" });
+        } catch (error) {
+            if (
+                error instanceof Error &&
+                ["PermissionDenied", "NotSupported", "NotImplemented"].includes(error.name)
+            )
+                return;
+            throw error;
+        }
+
+        let rejection: unknown;
+        try {
+            await peer.put("redirect/sentinel.bin", content("overwrite"));
+        } catch (error) {
+            rejection = error;
+        }
+        assert(
+            rejection instanceof Error && rejection.name === "SymbolicLinkStoragePathError",
+            "A write through a symlinked parent must be rejected",
+        );
+        equal(
+            Array.from(await Deno.readFile(join(outside, "sentinel.bin"))),
+            Array.from(sentinel),
+            "A rejected write must preserve the outside sentinel bytes",
+        );
+    } finally {
+        await peer.stop();
+        await Deno.remove(root, { recursive: true });
+        await Deno.remove(outside, { recursive: true });
+    }
+});
+
 for (const useChokidar of [false, true]) {
     Deno.test(`NFC startup rejects existing aliases with ${useChokidar ? "Chokidar" : "Deno"}`, async () => {
         const root = await Deno.makeTempDir();
@@ -289,6 +329,48 @@ Deno.test("initial NFC Chokidar inventory is not reported as a healthy watcher",
         await pending;
         assert(!duringInventory, "The initial inventory must complete before the watcher is healthy");
         assert(peer.health().ok, "A completed inventory must permit normal watcher health");
+    } finally {
+        release.resolve();
+        Deno.readDir = originalReadDir;
+        await pending?.catch(() => {});
+        await peer.stop();
+        await Deno.remove(root, { recursive: true });
+    }
+});
+
+Deno.test("stopping NFC Chokidar during a blocked root inventory leaves no watcher or dispatch", async () => {
+    const root = await Deno.makeTempDir();
+    const { peer, dispatched } = makePeer(root, { useChokidar: true, scanOfflineChanges: true });
+    const originalReadDir = Deno.readDir;
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    Deno.readDir = ((path: string | URL) => {
+        if (path !== root) return originalReadDir(path);
+        return {
+            async *[Symbol.asyncIterator]() {
+                started.resolve();
+                await release.promise;
+                yield* originalReadDir(path);
+            },
+        };
+    }) as typeof Deno.readDir;
+    let pending: Promise<void> | undefined;
+    try {
+        await Deno.writeTextFile(join(root, "note.md"), "retained");
+        pending = peer.start();
+        await started.promise;
+        assert(peer.watcher, "The Chokidar watcher must be installed during its initial inventory");
+
+        await peer.stop();
+        assert(!peer.watcher, "Stopping during inventory must remove the installed watcher");
+        assert(!peer.health().ok, "A stopped watcher must be unhealthy while its inventory is blocked");
+
+        release.resolve();
+        await pending;
+        pending = undefined;
+        equal(dispatched, [], "Releasing a stopped inventory must not dispatch a file");
+        assert(!peer.watcher, "The completed retired inventory must not reinstall its watcher");
+        assert(!peer.health().ok, "A completed retired inventory must remain unhealthy");
     } finally {
         release.resolve();
         Deno.readDir = originalReadDir;

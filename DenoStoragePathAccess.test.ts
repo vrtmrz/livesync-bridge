@@ -1,3 +1,4 @@
+import { resolve } from "@std/path";
 import { parseFilePath, type StoragePath } from "@vrtmrz/livesync-commonlib/storage";
 import { DenoStoragePathAccess } from "./DenoStoragePathAccess.ts";
 
@@ -159,6 +160,39 @@ Deno.test("propagates PermissionDenied from a controlled directory reader", asyn
     });
 });
 
+Deno.test("files rejects with the original reader error after yielding a root entry", async () => {
+    await withTempDir(async (root) => {
+        await Deno.mkdir(`${root}/z-child`);
+        const denied = new Deno.errors.PermissionDenied("controlled inventory permission denial");
+        const rootPath = resolve(root);
+        const access = new DenoStoragePathAccess(root, true, (path) => {
+            if (resolve(path) === rootPath) {
+                return (async function* () {
+                    yield { name: "0-root.txt", isFile: true, isDirectory: false, isSymlink: false } as Deno.DirEntry;
+                    yield { name: "z-child", isFile: false, isDirectory: true, isSymlink: false } as Deno.DirEntry;
+                })();
+            }
+            return {
+                [Symbol.asyncIterator]() {
+                    return { next: () => Promise.reject(denied) };
+                },
+            };
+        });
+        const files = access.files(() => false);
+
+        assertEquals<unknown>(
+            await files.next(),
+            { value: "0-root.txt", done: false },
+            "the root file should be yielded before the child directory is read",
+        );
+        await assertRejects(
+            () => files.next(),
+            (error) => error === denied,
+            "a child reader PermissionDenied should reject the whole inventory unchanged",
+        );
+    });
+});
+
 Deno.test("rejects symlink components in requested paths when symlinks are supported", async () => {
     await withTempDir(async (root) => {
         const outside = await Deno.makeTempDir();
@@ -180,6 +214,40 @@ Deno.test("rejects symlink components in requested paths when symlinks are suppo
                 () => access.resolveExisting(parseFilePath("link.txt")),
                 (error) => error instanceof Error && error.name === "SymbolicLinkStoragePathError",
                 "a requested symlink should be rejected before it is followed",
+            );
+        } finally {
+            await Deno.remove(outside, { recursive: true });
+        }
+    });
+});
+
+Deno.test("rejects write paths through a symlinked parent when symlinks are supported", async () => {
+    await withTempDir(async (root) => {
+        const outside = await Deno.makeTempDir();
+        const sentinel = new Uint8Array([0, 255, 10, 0, 195, 169]);
+        try {
+            await Deno.writeFile(`${outside}/sentinel.bin`, sentinel);
+            try {
+                await Deno.symlink(outside, `${root}/redirect`, { type: "dir" });
+            } catch (error) {
+                if (
+                    error instanceof Error &&
+                    ["PermissionDenied", "NotSupported", "NotImplemented"].includes(error.name)
+                )
+                    return;
+                throw error;
+            }
+
+            const access = new DenoStoragePathAccess(root, true);
+            await assertRejects(
+                () => access.resolveForWrite(parseFilePath("redirect/sentinel.bin")),
+                (error) => error instanceof Error && error.name === "SymbolicLinkStoragePathError",
+                "a write through a symlinked parent should be rejected before following it",
+            );
+            assertEquals(
+                Array.from(await Deno.readFile(`${outside}/sentinel.bin`)),
+                Array.from(sentinel),
+                "rejected resolution must preserve the outside sentinel bytes",
             );
         } finally {
             await Deno.remove(outside, { recursive: true });
