@@ -20,15 +20,12 @@ Of course, it is multi-directional!
 
 ### Path identity compatibility
 
-Unicode NFC support is an unreleased addition which requires the Commonlib
-package containing the `/storage` entry and the direct-file path identity
-option. Published Commonlib `0.3.0` still requires Legacy identity for Bridge.
+Published Commonlib `0.3.1` provides the `/storage` entry, Unicode-resolving
+storage adapters, and the direct-file `pathNormalizationVersion` option required
+by this integration. This Bridge implementation remains unreleased and pins
+that exact registry version in its import map and `deno.lock`.
 
-Publish and validate the required immutable Commonlib package before releasing
-this Bridge integration. Then replace the provisional package version in every
-Commonlib import and regenerate `deno.lock` from the registry. Follow the
-[Commonlib and application release order](https://github.com/vrtmrz/livesync-commonlib/blob/main/docs/releasing.md#coordinating-package-and-application-releases);
-a local package overlay does not establish registry installation readiness.
+Follow the [Commonlib and application release order](https://github.com/vrtmrz/livesync-commonlib/blob/main/docs/releasing.md#coordinating-package-and-application-releases).
 
 Each peer selects `pathNormalizationVersion`:
 

@@ -50,8 +50,8 @@ Native Windows and macOS filesystem behaviour needs its own verification. This
 does not establish that every shutdown or concurrent external-filesystem
 interleaving is covered.
 
-NFC development validation uses the exact packed Commonlib candidate which
-provides `/storage` and the DFM path identity option. Published Commonlib 0.3.0
-lacks those additions. Before distributing an independently installable Bridge
-change, publish and pin an immutable package version containing them; a local
-package overlay is not registry installation evidence.
+Integration checks use the published registry package
+`@vrtmrz/livesync-commonlib@0.3.1`, pinned by the import map and `deno.lock`.
+Run `deno install --frozen` from the repository root before the checks to
+install from that lockfile. The Commonlib package is published; this Bridge
+implementation remains unreleased.
