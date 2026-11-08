@@ -6,6 +6,7 @@ import { LRUCache } from "octagonal-wheels/memory/LRUCache";
 import { computeHash } from "./util.ts";
 import { getStoragePathComparisonKey, parseFilePath, type PathComparisonSettings } from "@vrtmrz/livesync-commonlib/storage";
 import { getPeerPathNormalizationVersion } from "./pathIdentity.ts";
+import { getPeerStateStore } from "./PeerState.ts";
 
 export type DispatchFun = (source: Peer, path: string, data: FileData | false) => Promise<void>;
 
@@ -127,10 +128,10 @@ export abstract class Peer {
         return `${this.config.name}-${this.config.type}-${this.config.baseDir}-${key}`;
     }
     setSetting(key: string, value: string) {
-        return localStorage.setItem(this._getKey(key), value);
+        return getPeerStateStore().setItem(this._getKey(key), value);
     }
     getSetting(key: string) {
-        return localStorage.getItem(this._getKey(key));
+        return getPeerStateStore().getItem(this._getKey(key));
     }
     compareDate(a: { mtime?: number }, b: { mtime?: number }) {
         const aMTime = ~~(a?.mtime ?? 0 / 1000);

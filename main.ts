@@ -3,6 +3,7 @@ import { Hub } from "./Hub.ts";
 import { Config } from "./types.ts";
 import { parseArgs } from "@std/cli";
 import { dirname } from "@std/path";
+import { getPeerStateStore } from "./PeerState.ts";
 
 // Last-resort safety net for a long-running sync daemon. A transient backend
 // hiccup — e.g. CouchDB returning a non-JSON body while still warming up at
@@ -29,6 +30,7 @@ const flags = parseArgs(Deno.args, {
 });
 if (flags.reset) {
     localStorage.clear();
+    getPeerStateStore().clear();
 }
 try {
     const confText = await Deno.readTextFile(configFile);
