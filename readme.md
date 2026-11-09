@@ -157,8 +157,23 @@ CouchDB resume positions are saved separately for each peer name, `baseDir`,
 server URL (including any proxy path), and database name. Credentials are not
 part of this identity. Existing checkpoints without a remote identity are not
 reused, so the first connection after upgrading reads remote changes from the
-beginning. Keep the Deno `localStorage` data to retain resume positions across
-restarts.
+beginning. Keep the peer state file (see below) to retain resume positions
+across restarts.
+
+### Where peer state is stored
+
+Resume positions and the per-file records used by offline scans are kept in a
+SQLite file:
+
+- `$LSB_STATE_FILE`, if set;
+- otherwise `$DENO_DIR/location_data/livesync-bridge-state.sqlite` when
+  `DENO_DIR` is set, as in the Docker image;
+- otherwise `dat/livesync-bridge-state.sqlite`.
+
+Earlier versions used Deno's `localStorage`, which is limited to 10 MB. Storage
+peers keep one record per file, so vaults with tens of thousands of files
+reached that limit, after which files were no longer sent. Existing
+`localStorage` entries are copied into the state file once, on the first start.
 
 CouchDB changes with unavailable chunks are retried from the source database, while
 failed deliveries are retried with capped backoff and other files continue. A newer
@@ -183,8 +198,8 @@ git clone https://github.com/vrtmrz/livesync-bridge
 docker compose up -d
 ```
 
-The Compose configuration stores Deno's `localStorage` data, which offline
-scans use to identify changed files, in the named volume
+The Compose configuration stores the peer state file, which offline scans use
+to identify changed files, in the named volume
 `bridge_local_storage`. Keep this volume when recreating containers. Running
 `docker compose down --volumes` removes it, so the next offline scan must
 rebuild this data.
