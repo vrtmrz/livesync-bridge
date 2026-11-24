@@ -343,7 +343,6 @@ export class PeerStorage extends Peer {
                 // supersedes the earlier watcher event's content.
                 data = await this.get(path, access);
                 if (!isCurrent()) return;
-                if (data !== false) await this.writeFileStat(path, undefined, access, isCurrent);
             } catch (ex) {
                 if (!(ex instanceof Deno.errors.NotFound)) {
                     this.normalLog(`File read failed: ${path}`, LOG_LEVEL_NOTICE);
@@ -355,8 +354,19 @@ export class PeerStorage extends Peer {
             const repeating = await this.isRepeating(path, data, this.pathPolicy(access));
             if (!repeating && isCurrent()) {
                 this.sendLog(`${path} change detected`);
-                await this.dispatchToHub(this, access ? path : this.toGlobalPath(path), data);
+                try {
+                    await this.dispatchToHub(this, access ? path : this.toGlobalPath(path), data);
+                } catch (error) {
+                    // A rejected delivery must remain eligible for the watcher's retry.
+                    this.cache.clear();
+                    throw error;
+                }
             }
+            // Record the sent content's stat only after delivery, so the offline scan retries a failed upload.
+            const sent = { isFile: true, mtime: new Date(data.mtime), size: data.size } as Deno.FileInfo;
+            await this.writeFileStat(path, sent, access, isCurrent).catch((ex) => {
+                if (!(ex instanceof Deno.errors.NotFound)) throw ex;
+            });
         });
         return Promise.resolve();
     }
