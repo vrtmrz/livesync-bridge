@@ -490,6 +490,34 @@ Deno.test("PeerStorage forwards local edits after suppressing a received nested 
     }
 });
 
+Deno.test("PeerStorage sends a file again after its delivery failed", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-failed-delivery-" });
+    // The failed delivery rejects the scheduled dispatch, which main.ts also keeps alive.
+    const keepAlive = (event: PromiseRejectionEvent) => event.preventDefault();
+    globalThis.addEventListener("unhandledrejection", keepAlive);
+    try {
+        const { peer } = makeWritePeer(tempDir);
+        const path = join(tempDir, "note.md");
+        await Deno.writeTextFile(path, "text");
+        let attempts = 0;
+        peer.dispatchToHub = () => {
+            attempts++;
+            return attempts === 1 ? Promise.reject(new Error("delivery failed")) : Promise.resolve();
+        };
+
+        await peer.dispatch(path);
+        await waitFor(() => attempts === 1, "The file should be sent");
+        assertEquals(await peer.isChanged("note.md"), true, "A failed delivery must leave the file for the offline scan");
+
+        await peer.dispatch(path);
+        await waitFor(() => attempts === 2, "The next event must send the same content again");
+        assertEquals(await peer.isChanged("note.md"), false, "A delivered file should not be sent again");
+    } finally {
+        globalThis.removeEventListener("unhandledrejection", keepAlive);
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
 type ChokidarUnlinkFixture = {
     path: string;
     watcher: ControlledChokidarWatcher;
